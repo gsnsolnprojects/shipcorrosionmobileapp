@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -13,8 +13,12 @@ import {
   View,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { NauticalBackground } from "../components/NauticalBackground";
+import { ThemeToggle } from "../components/ThemeToggle";
 import { deleteInferenceJob, getSurvey, listSurveys } from "../lib/api";
 import { getQueue, removeFromQueue, syncQueue } from "../lib/offlineQueue";
+import { useTheme } from "../theme/ThemeContext";
+import type { ThemeColors } from "../theme/colors";
 import type { SurveySummary, VisionSession } from "../types";
 
 function todayLabel() {
@@ -41,6 +45,8 @@ export function SurveyListScreen({
   onBack: () => void;
   onOpenSurvey: (surveyName: string) => void;
 }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [surveys, setSurveys] = useState<SurveySummary[]>([]);
   const [pendingBySurvey, setPendingBySurvey] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
@@ -145,14 +151,26 @@ export function SurveyListScreen({
 
   return (
     <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <NauticalBackground
+        icons={[
+          { name: "sail-boat", size: 240, opacity: 0.13, style: { top: -20, right: -60, transform: [{ rotate: "6deg" }] } },
+          { name: "anchor", size: 90, opacity: 0.12, style: { bottom: 100, left: -25, transform: [{ rotate: "10deg" }] } },
+        ]}
+      />
       <View style={styles.header}>
         <Pressable onPress={onBack} style={styles.linkRow}>
-          <Ionicons name="chevron-back" size={18} color="#fb923c" />
+          <Ionicons name="chevron-back" size={18} color={colors.accentText} />
           <Text style={styles.link}>Project</Text>
         </Pressable>
-        <Text style={styles.project}>{projectName}</Text>
+        <View style={styles.headerRight}>
+          <Text style={styles.project}>{projectName}</Text>
+          <ThemeToggle />
+        </View>
       </View>
-      <Text style={styles.title}>Surveys</Text>
+      <View style={styles.titleRow}>
+        <Ionicons name="compass-outline" size={22} color={colors.accentText} />
+        <Text style={styles.title}>Surveys</Text>
+      </View>
       <Text style={styles.hint}>
         A survey is one walk around the ship (or one maintenance visit). Inspect parts one by one, then
         compare each part and the whole visit.
@@ -164,7 +182,7 @@ export function SurveyListScreen({
         value={newName}
         onChangeText={setNewName}
         placeholder="MV Pacific Glory — 2026-08-31"
-        placeholderTextColor="#64748b"
+        placeholderTextColor={colors.textMuted}
       />
       <Pressable style={styles.primary} onPress={startSurvey} disabled={!newName.trim()}>
         <Ionicons name="play-forward" size={16} color="#fff" />
@@ -174,29 +192,29 @@ export function SurveyListScreen({
       <Text style={styles.section}>Past surveys</Text>
       {surveys.length > 1 ? (
         <View style={styles.searchWrap}>
-          <Ionicons name="search" size={16} color="#64748b" style={styles.searchIcon} />
+          <Ionicons name="search" size={16} color={colors.textMuted} style={styles.searchIcon} />
           <TextInput
             style={styles.search}
             value={search}
             onChangeText={setSearch}
             placeholder="Search past surveys"
-            placeholderTextColor="#64748b"
+            placeholderTextColor={colors.textMuted}
           />
         </View>
       ) : null}
       {loading && surveys.length === 0 ? (
-        <ActivityIndicator color="#f97316" style={{ marginTop: 20 }} />
+        <ActivityIndicator color={colors.accent} style={{ marginTop: 20 }} />
       ) : error ? (
         <View>
           <Text style={styles.error}>{error}</Text>
           <Pressable style={styles.retry} onPress={load}>
-            <Ionicons name="refresh" size={14} color="#e2e8f0" />
+            <Ionicons name="refresh" size={14} color={colors.textPrimary} />
             <Text style={styles.retryText}>Retry</Text>
           </Pressable>
         </View>
       ) : surveys.length === 0 ? (
         <View style={styles.emptyWrap}>
-          <Ionicons name="clipboard-outline" size={28} color="#475569" />
+          <Ionicons name="clipboard-outline" size={28} color={colors.textMuted} />
           <Text style={styles.empty}>No surveys yet. Start one above, then add ship parts.</Text>
         </View>
       ) : filteredSurveys.length === 0 ? (
@@ -204,7 +222,7 @@ export function SurveyListScreen({
       ) : (
         <ScrollView
           contentContainerStyle={{ paddingBottom: 40 }}
-          refreshControl={<RefreshControl refreshing={loading} onRefresh={load} tintColor="#f97316" />}
+          refreshControl={<RefreshControl refreshing={loading} onRefresh={load} tintColor={colors.accent} />}
         >
           {filteredSurveys.map((s) => {
             const pending = pendingBySurvey[s.surveyName] || 0;
@@ -213,7 +231,7 @@ export function SurveyListScreen({
                 <View style={styles.rowHeader}>
                   <Text style={styles.rowTitle}>{s.surveyName}</Text>
                   <Pressable hitSlop={10} onPress={() => deleteSurvey(s.surveyName)} style={styles.deleteBtn}>
-                    <Ionicons name="trash-outline" size={18} color="#64748b" />
+                    <Ionicons name="trash-outline" size={18} color={colors.textMuted} />
                   </Pressable>
                 </View>
                 <Text style={styles.rowMeta}>
@@ -233,75 +251,79 @@ export function SurveyListScreen({
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#0f172a", padding: 20, paddingTop: 52 },
-  header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
-  linkRow: { flexDirection: "row", alignItems: "center" },
-  link: { color: "#fb923c", fontWeight: "600" },
-  project: { color: "#94a3b8", fontWeight: "600" },
-  title: { color: "#f8fafc", fontSize: 26, fontWeight: "700" },
-  hint: { color: "#94a3b8", marginTop: 8, marginBottom: 16, lineHeight: 20 },
-  label: { color: "#cbd5e1", marginBottom: 6 },
-  input: {
-    backgroundColor: "#111827",
-    borderWidth: 1,
-    borderColor: "#334155",
-    borderRadius: 10,
-    color: "#f8fafc",
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-  },
-  primary: {
-    backgroundColor: "#ea580c",
-    marginTop: 12,
-    borderRadius: 10,
-    paddingVertical: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-  },
-  primaryText: { color: "#fff", fontWeight: "700", fontSize: 16 },
-  section: { color: "#e2e8f0", fontWeight: "700", marginTop: 24, marginBottom: 10 },
-  searchWrap: { position: "relative", justifyContent: "center", marginBottom: 12 },
-  searchIcon: { position: "absolute", left: 12, zIndex: 1 },
-  search: {
-    backgroundColor: "#111827",
-    borderWidth: 1,
-    borderColor: "#334155",
-    borderRadius: 10,
-    color: "#f8fafc",
-    paddingHorizontal: 12,
-    paddingLeft: 36,
-    paddingVertical: 10,
-  },
-  error: { color: "#fca5a5" },
-  retry: {
-    marginTop: 12,
-    alignSelf: "flex-start",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    borderWidth: 1,
-    borderColor: "#334155",
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-  },
-  retryText: { color: "#e2e8f0", fontWeight: "600" },
-  emptyWrap: { alignItems: "center", marginTop: 24, gap: 10 },
-  empty: { color: "#64748b", textAlign: "center", lineHeight: 20 },
-  row: {
-    backgroundColor: "#111827",
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: "#1e293b",
-  },
-  rowHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
-  rowTitle: { color: "#f8fafc", fontSize: 16, fontWeight: "600", flex: 1, marginRight: 8 },
-  deleteBtn: { padding: 2 },
-  rowMeta: { color: "#94a3b8", marginTop: 4, fontSize: 13 },
-  pendingTag: { color: "#fb923c", marginTop: 6, fontSize: 12, fontWeight: "600" },
-});
+function createStyles(colors: ThemeColors) {
+  return StyleSheet.create({
+    root: { flex: 1, backgroundColor: colors.background, padding: 20, paddingTop: 52 },
+    header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
+    linkRow: { flexDirection: "row", alignItems: "center" },
+    link: { color: colors.accentText, fontWeight: "600" },
+    headerRight: { flexDirection: "row", alignItems: "center", gap: 12 },
+    project: { color: colors.textSecondary, fontWeight: "600" },
+    titleRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 4 },
+    title: { color: colors.textPrimary, fontSize: 26, fontWeight: "700" },
+    hint: { color: colors.textSecondary, marginTop: 8, marginBottom: 16, lineHeight: 20 },
+    label: { color: colors.textSecondary, marginBottom: 6 },
+    input: {
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+      borderRadius: 10,
+      color: colors.textPrimary,
+      paddingHorizontal: 12,
+      paddingVertical: 12,
+    },
+    primary: {
+      backgroundColor: colors.accent,
+      marginTop: 12,
+      borderRadius: 10,
+      paddingVertical: 14,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+    },
+    primaryText: { color: "#fff", fontWeight: "700", fontSize: 16 },
+    section: { color: colors.textPrimary, fontWeight: "700", marginTop: 24, marginBottom: 10 },
+    searchWrap: { position: "relative", justifyContent: "center", marginBottom: 12 },
+    searchIcon: { position: "absolute", left: 12, zIndex: 1 },
+    search: {
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+      borderRadius: 10,
+      color: colors.textPrimary,
+      paddingHorizontal: 12,
+      paddingLeft: 36,
+      paddingVertical: 10,
+    },
+    error: { color: colors.danger },
+    retry: {
+      marginTop: 12,
+      alignSelf: "flex-start",
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+      borderRadius: 8,
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+    },
+    retryText: { color: colors.textPrimary, fontWeight: "600" },
+    emptyWrap: { alignItems: "center", marginTop: 24, gap: 10 },
+    empty: { color: colors.textMuted, textAlign: "center", lineHeight: 20 },
+    row: {
+      backgroundColor: colors.surface,
+      borderRadius: 12,
+      padding: 16,
+      marginBottom: 10,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+    },
+    rowHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
+    rowTitle: { color: colors.textPrimary, fontSize: 16, fontWeight: "600", flex: 1, marginRight: 8 },
+    deleteBtn: { padding: 2 },
+    rowMeta: { color: colors.textSecondary, marginTop: 4, fontSize: 13 },
+    pendingTag: { color: colors.accentText, marginTop: 6, fontSize: 12, fontWeight: "600" },
+  });
+}

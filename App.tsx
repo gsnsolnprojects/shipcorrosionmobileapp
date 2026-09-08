@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { ActivityIndicator, Alert, Animated, StyleSheet, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { LoginScreen } from "./src/screens/LoginScreen";
+import { HomeScreen } from "./src/screens/HomeScreen";
+import { SettingsScreen } from "./src/screens/SettingsScreen";
 import { ProjectScreen } from "./src/screens/ProjectScreen";
 import { SurveyListScreen } from "./src/screens/SurveyListScreen";
 import { SurveyDashboardScreen } from "./src/screens/SurveyDashboardScreen";
@@ -12,11 +14,14 @@ import { getInferenceResults, setUnauthorizedHandler, startInspect } from "./src
 import { loadApiBaseUrlOverride } from "./src/lib/config";
 import { loadVisionSession } from "./src/lib/session";
 import { supabase } from "./src/lib/supabase";
+import { ThemeProvider, useTheme } from "./src/theme/ThemeContext";
 import type { InspectResults, LocalPhoto, VisionSession } from "./src/types";
 
 type Screen =
   | "boot"
   | "login"
+  | "home"
+  | "settings"
   | "project"
   | "surveys"
   | "survey"
@@ -34,6 +39,16 @@ function FadeInScreen({ screenKey, children }: { screenKey: string; children: Re
 }
 
 export default function App() {
+  return (
+    <ThemeProvider>
+      <AppInner />
+    </ThemeProvider>
+  );
+}
+
+function AppInner() {
+  const { colors, scheme } = useTheme();
+  const statusBarStyle = scheme === "dark" ? "light" : "dark";
   const [screen, setScreen] = useState<Screen>("boot");
   const [session, setSession] = useState<VisionSession | null>(null);
   const [projectName, setProjectName] = useState("");
@@ -53,7 +68,7 @@ export default function App() {
         if (cancelled) return;
         if (existing?.companyName) {
           setSession(existing);
-          setScreen("project");
+          setScreen("home");
         } else {
           setScreen("login");
         }
@@ -114,6 +129,13 @@ export default function App() {
     setScreen("capture");
   }, []);
 
+  const onOnDeviceInspect = (nextResults: InspectResults) => {
+    setRegionName(nextResults.regionName || "");
+    setInferenceId(null);
+    setResults(nextResults);
+    setScreen("results");
+  };
+
   const openVisitResults = async (id: string) => {
     if (!session) return;
     try {
@@ -129,9 +151,9 @@ export default function App() {
 
   if (screen === "boot") {
     return (
-      <View style={styles.boot}>
-        <ActivityIndicator color="#f97316" size="large" />
-        <StatusBar style="light" />
+      <View style={[styles.boot, { backgroundColor: colors.background }]}>
+        <ActivityIndicator color={colors.accent} size="large" />
+        <StatusBar style={statusBarStyle} />
       </View>
     );
   }
@@ -143,11 +165,38 @@ export default function App() {
           <LoginScreen
             onLoggedIn={(next) => {
               setSession(next);
-              setScreen("project");
+              setScreen("home");
             }}
           />
         </FadeInScreen>
-        <StatusBar style="light" />
+        <StatusBar style={statusBarStyle} />
+      </>
+    );
+  }
+
+  if (screen === "home") {
+    return (
+      <>
+        <FadeInScreen screenKey={screen}>
+          <HomeScreen
+            session={session}
+            onChooseProject={() => setScreen("project")}
+            onOpenSettings={() => setScreen("settings")}
+            onSignOut={signOut}
+          />
+        </FadeInScreen>
+        <StatusBar style={statusBarStyle} />
+      </>
+    );
+  }
+
+  if (screen === "settings") {
+    return (
+      <>
+        <FadeInScreen screenKey={screen}>
+          <SettingsScreen onBack={() => setScreen("home")} onSignOut={signOut} />
+        </FadeInScreen>
+        <StatusBar style={statusBarStyle} />
       </>
     );
   }
@@ -162,10 +211,10 @@ export default function App() {
               setProjectName(name);
               setScreen("surveys");
             }}
-            onSignOut={signOut}
+            onBack={() => setScreen("home")}
           />
         </FadeInScreen>
-        <StatusBar style="light" />
+        <StatusBar style={statusBarStyle} />
       </>
     );
   }
@@ -184,7 +233,7 @@ export default function App() {
             }}
           />
         </FadeInScreen>
-        <StatusBar style="light" />
+        <StatusBar style={statusBarStyle} />
       </>
     );
   }
@@ -207,7 +256,7 @@ export default function App() {
             onOpenVisit={openVisitResults}
           />
         </FadeInScreen>
-        <StatusBar style="light" />
+        <StatusBar style={statusBarStyle} />
       </>
     );
   }
@@ -225,7 +274,7 @@ export default function App() {
             onCancelView={() => setScreen("survey")}
           />
         </FadeInScreen>
-        <StatusBar style="light" />
+        <StatusBar style={statusBarStyle} />
       </>
     );
   }
@@ -248,9 +297,14 @@ export default function App() {
               setRegionName("");
               setScreen("capture");
             }}
+            onAddMorePhotos={() => {
+              setResults(null);
+              setInferenceId(null);
+              setScreen("capture");
+            }}
           />
         </FadeInScreen>
-        <StatusBar style="light" />
+        <StatusBar style={statusBarStyle} />
       </>
     );
   }
@@ -262,11 +316,13 @@ export default function App() {
           session={session}
           projectName={projectName}
           surveyName={surveyName}
+          initialRegionName={regionName}
           onBack={() => setScreen("survey")}
           onUpload={onUpload}
+          onOnDeviceInspect={onOnDeviceInspect}
         />
       </FadeInScreen>
-      <StatusBar style="light" />
+      <StatusBar style={statusBarStyle} />
     </>
   );
 }

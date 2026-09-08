@@ -51,10 +51,19 @@
         "expo-build-properties",
         {
           "android": {
-            "usesCleartextTraffic": true
+            "usesCleartextTraffic": true,
+            "packagingOptions": {
+              "pickFirst": [
+                "**/libc++_shared.so",
+                "**/libfbjni.so",
+                "**/libjsi.so"
+              ]
+            }
           }
         }
-      ]
+      ],
+      "react-native-fast-tflite",
+      "expo-asset"
     ],
     "extra": {
       "eas": {

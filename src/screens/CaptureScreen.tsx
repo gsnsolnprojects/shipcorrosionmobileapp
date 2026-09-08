@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -10,16 +10,22 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
+import { NauticalBackground } from "../components/NauticalBackground";
+import { OnDeviceModelPanel } from "../components/OnDeviceModelPanel";
+import { ShipAreaPicker } from "../components/ShipAreaPicker";
+import { ThemeToggle } from "../components/ThemeToggle";
 import { PIXEL_DISCLAIMER } from "../lib/config";
 import { enqueuePart } from "../lib/offlineQueue";
+import { CORROSION_CLASS_NAMES, runOnDeviceInspection } from "../lib/onDeviceInference";
 import { canRunInference } from "../lib/session";
-import type { LocalPhoto, VisionSession } from "../types";
+import { useTheme } from "../theme/ThemeContext";
+import type { ThemeColors } from "../theme/colors";
+import type { InspectResults, LocalPhoto, VisionSession } from "../types";
 
 function photoFromAsset(asset: ImagePicker.ImagePickerAsset, index: number): LocalPhoto {
   const uri = asset.uri;
@@ -33,20 +39,27 @@ export function CaptureScreen({
   session,
   projectName,
   surveyName,
+  initialRegionName,
   onBack,
   onUpload,
+  onOnDeviceInspect,
 }: {
   session: VisionSession;
   projectName: string;
   surveyName: string;
+  initialRegionName?: string;
   onBack: () => void;
   onUpload: (regionName: string, photos: LocalPhoto[]) => Promise<void>;
+  onOnDeviceInspect: (results: InspectResults) => void;
 }) {
-  const [regionName, setRegionName] = useState("");
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const [regionName, setRegionName] = useState(initialRegionName || "");
   const [photos, setPhotos] = useState<LocalPhoto[]>([]);
   const [showCamera, setShowCamera] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [inspectingOnDevice, setInspectingOnDevice] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
   const flashOpacity = useRef(new Animated.Value(0)).current;
@@ -143,6 +156,36 @@ export function CaptureScreen({
     }
   };
 
+  // Runs the corrosion model directly on the phone — no server, no network,
+  // across every captured photo. Not saved to survey history (that only
+  // exists server-side) — this is an on-the-spot check, not a permanent record.
+  const inspectOnDevice = async () => {
+    const name = regionName.trim();
+    if (!name || photos.length === 0) return;
+    setInspectingOnDevice(true);
+    try {
+      const batch = await runOnDeviceInspection(photos);
+      const results: InspectResults = {
+        inferenceId: `ondevice_${Date.now()}`,
+        regionName: name,
+        surveyName,
+        images: batch.images,
+        batch: {
+          imageCount: photos.length,
+          meanCorrosionPercent: batch.meanCorrosionPercent ?? undefined,
+          byClass: batch.byClass,
+          classNames: [...CORROSION_CLASS_NAMES],
+        },
+        classNames: [...CORROSION_CLASS_NAMES],
+      };
+      onOnDeviceInspect(results);
+    } catch (err) {
+      Alert.alert("On-device inspect failed", err instanceof Error ? err.message : String(err));
+    } finally {
+      setInspectingOnDevice(false);
+    }
+  };
+
   if (showCamera) {
     const lastPhoto = photos[photos.length - 1];
     return (
@@ -177,40 +220,49 @@ export function CaptureScreen({
   }
 
   const canUpload = regionName.trim().length > 0 && photos.length > 0 && !uploading;
+  const canInspectOnDevice =
+    regionName.trim().length > 0 && photos.length > 0 && !uploading && !inspectingOnDevice;
 
   return (
     <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <NauticalBackground
+        icons={[
+          { name: "compass-outline", size: 200, opacity: 0.12, style: { top: -30, right: -40, transform: [{ rotate: "8deg" }] } },
+          { name: "ship-wheel", size: 120, opacity: 0.12, style: { bottom: 60, left: -35, transform: [{ rotate: "-14deg" }] } },
+        ]}
+      />
       <View style={styles.header}>
         <Pressable onPress={onBack} style={styles.linkRow}>
-          <Ionicons name="chevron-back" size={18} color="#fb923c" />
+          <Ionicons name="chevron-back" size={18} color={colors.accentText} />
           <Text style={styles.link}>Survey</Text>
         </Pressable>
-        <Text style={styles.project} numberOfLines={1}>
-          {surveyName}
-        </Text>
+        <View style={styles.headerRight}>
+          <Text style={styles.project} numberOfLines={1}>
+            {surveyName}
+          </Text>
+          <OnDeviceModelPanel session={session} projectName={projectName} />
+          <ThemeToggle />
+        </View>
       </View>
       <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
-        <Text style={styles.title}>Inspect a part</Text>
+        <View style={styles.titleRow}>
+          <Ionicons name="construct-outline" size={22} color={colors.accentText} />
+          <Text style={styles.title}>Inspect a part</Text>
+        </View>
         <Text style={styles.hint}>
           Walk to one area of the ship, name it (for example Cargo hold 3 starboard), then upload photos. {PIXEL_DISCLAIMER}
         </Text>
 
         <Text style={styles.label}>Ship part</Text>
-        <TextInput
-          style={styles.input}
-          value={regionName}
-          onChangeText={setRegionName}
-          placeholder="Cargo hold 3 starboard"
-          placeholderTextColor="#64748b"
-        />
+        <ShipAreaPicker value={regionName} onChangeText={setRegionName} placeholder="Cargo hold 3 starboard" />
 
         <View style={styles.rowBtns}>
           <Pressable style={styles.secondary} onPress={openCamera}>
-            <Ionicons name="camera" size={18} color="#e2e8f0" />
+            <Ionicons name="camera" size={18} color={colors.textPrimary} />
             <Text style={styles.secondaryText}>Camera</Text>
           </Pressable>
           <Pressable style={styles.secondary} onPress={pickGallery}>
-            <Ionicons name="images" size={18} color="#e2e8f0" />
+            <Ionicons name="images" size={18} color={colors.textPrimary} />
             <Text style={styles.secondaryText}>Gallery</Text>
           </Pressable>
         </View>
@@ -240,26 +292,48 @@ export function CaptureScreen({
             </>
           )}
         </Pressable>
+
+        <Pressable
+          style={[styles.secondaryAction, !canInspectOnDevice && styles.disabled]}
+          onPress={inspectOnDevice}
+          disabled={!canInspectOnDevice}
+        >
+          {inspectingOnDevice ? (
+            <ActivityIndicator color={colors.textPrimary} />
+          ) : (
+            <>
+              <Ionicons name="hardware-chip-outline" size={18} color={colors.textPrimary} />
+              <Text style={styles.secondaryActionText}>Inspect on-device</Text>
+            </>
+          )}
+        </Pressable>
+        <Text style={styles.onDeviceHint}>
+          Runs the model on this phone, no signal needed. Not saved to survey history — an
+          on-the-spot check, not a permanent record.
+        </Text>
       </ScrollView>
     </KeyboardAvoidingView>
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#0f172a", padding: 20, paddingTop: 52 },
+function createStyles(colors: ThemeColors) {
+  return StyleSheet.create({
+  root: { flex: 1, backgroundColor: colors.background, padding: 20, paddingTop: 52 },
   header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 },
+  headerRight: { flexDirection: "row", alignItems: "center", gap: 12 },
   linkRow: { flexDirection: "row", alignItems: "center" },
-  link: { color: "#fb923c", fontWeight: "600" },
-  project: { color: "#94a3b8", fontWeight: "600" },
-  title: { color: "#f8fafc", fontSize: 26, fontWeight: "700" },
-  hint: { color: "#94a3b8", marginTop: 8, marginBottom: 16, lineHeight: 20 },
-  label: { color: "#cbd5e1", marginBottom: 6 },
+  link: { color: colors.accentText, fontWeight: "600" },
+  project: { color: colors.textSecondary, fontWeight: "600" },
+  titleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  title: { color: colors.textPrimary, fontSize: 26, fontWeight: "700" },
+  hint: { color: colors.textSecondary, marginTop: 8, marginBottom: 16, lineHeight: 20 },
+  label: { color: colors.textSecondary, marginBottom: 6 },
   input: {
-    backgroundColor: "#111827",
+    backgroundColor: colors.surface,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: colors.surfaceBorder,
     borderRadius: 10,
-    color: "#f8fafc",
+    color: colors.textPrimary,
     paddingHorizontal: 12,
     paddingVertical: 12,
   },
@@ -267,7 +341,7 @@ const styles = StyleSheet.create({
   secondary: {
     flex: 1,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: colors.surfaceBorder,
     borderRadius: 10,
     paddingVertical: 12,
     flexDirection: "row",
@@ -275,11 +349,11 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 8,
   },
-  secondaryText: { color: "#e2e8f0", fontWeight: "600" },
-  count: { color: "#64748b", marginTop: 16, marginBottom: 8 },
+  secondaryText: { color: colors.textPrimary, fontWeight: "600" },
+  count: { color: colors.textMuted, marginTop: 16, marginBottom: 8 },
   thumbs: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   thumbWrap: { width: 96, height: 96 },
-  thumb: { width: 96, height: 96, borderRadius: 8, backgroundColor: "#1e293b" },
+  thumb: { width: 96, height: 96, borderRadius: 8, backgroundColor: colors.surfaceAlt },
   remove: {
     position: "absolute",
     top: -6,
@@ -293,7 +367,7 @@ const styles = StyleSheet.create({
   },
   removeText: { color: "#fff", fontWeight: "700" },
   primary: {
-    backgroundColor: "#ea580c",
+    backgroundColor: colors.accent,
     marginTop: 24,
     borderRadius: 10,
     paddingVertical: 14,
@@ -304,6 +378,21 @@ const styles = StyleSheet.create({
   },
   disabled: { opacity: 0.45 },
   primaryText: { color: "#fff", fontWeight: "700", fontSize: 16 },
+  secondaryAction: {
+    marginTop: 14,
+    borderWidth: 1,
+    borderColor: colors.surfaceBorder,
+    borderRadius: 10,
+    paddingVertical: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  secondaryActionText: { color: colors.textPrimary, fontWeight: "700", fontSize: 16 },
+  onDeviceHint: { color: colors.textMuted, fontSize: 12, marginTop: 8, lineHeight: 17, textAlign: "center" },
+  // Camera viewfinder is intentionally always dark regardless of app theme
+  // (matches standard camera-app UX, not "app content").
   cameraRoot: { flex: 1, backgroundColor: "#000" },
   cameraBar: {
     position: "absolute",
@@ -359,4 +448,5 @@ const styles = StyleSheet.create({
     borderColor: "#fb923c",
   },
   lastShot: { width: "100%", height: "100%" },
-});
+  });
+}

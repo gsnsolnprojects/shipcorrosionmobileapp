@@ -58,14 +58,61 @@ async function cacheGet<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
 
 export async function fetchProjects(companyId: string): Promise<ProjectRow[]> {
   return cacheGet(`visionm.cache.projects.${companyId}`, async () => {
+    // This app is exclusively for corrosion inspection — only ever show
+    // projects flagged as such, never a company's other vision projects.
     const { data, error } = await supabase
       .from("projects")
       .select("id, name")
       .eq("company_id", companyId)
+      .eq("project_type", "corrosion")
       .order("name", { ascending: true });
     if (error) throw new Error(error.message);
     return (data || []).map((p) => ({ id: String(p.id), name: String(p.name) }));
   });
+}
+
+/**
+ * Renames a project/vessel: updates the canonical name in Supabase, then
+ * asks the backend to cascade that rename across every MongoDB collection
+ * scoped by company/project name (surveys, photos, actions, pinned model) —
+ * otherwise that historical data would be orphaned under the old name.
+ */
+export async function renameProject(
+  session: VisionSession,
+  projectId: string,
+  oldProjectName: string,
+  newProjectName: string
+): Promise<void> {
+  const { error } = await supabase.from("projects").update({ name: newProjectName }).eq("id", projectId);
+  if (error) throw new Error(error.message);
+
+  try {
+    const res = await fetch(apiUrl("/projects/rename"), {
+      method: "POST",
+      headers: authHeaderRecord(session, true),
+      body: JSON.stringify({
+        company: session.companyName,
+        oldProjectName,
+        newProjectName,
+      }),
+    });
+    if (!res.ok) {
+      await throwIfUnauthorized(res);
+      throw new Error(await readError(res));
+    }
+  } catch (fetchErr) {
+    // A raw "Network request failed" here almost always means the server
+    // address in Settings is wrong/stale, not a bug in this call — make
+    // that the visible message instead of a bare TypeError.
+    if (fetchErr instanceof TypeError) {
+      throw new Error(
+        "Could not reach the server. Check the server address in Settings — it may be out of date."
+      );
+    }
+    throw fetchErr;
+  }
+
+  await AsyncStorage.removeItem(`visionm.cache.projects.${session.companyId}`);
 }
 
 export async function startInspect(
@@ -100,6 +147,23 @@ export async function startInspect(
     throw new Error(await readError(res));
   }
   return res.json();
+}
+
+export async function deleteInferenceImage(
+  session: VisionSession,
+  inferenceId: string,
+  filename: string
+): Promise<{ batch: InspectResults["batch"]; remainingImages: number }> {
+  const res = await fetch(
+    apiUrl(`/inference/${encodeURIComponent(inferenceId)}/image/${encodeURIComponent(filename)}`),
+    { method: "DELETE", headers: authHeaderRecord(session, true) }
+  );
+  if (!res.ok) {
+    await throwIfUnauthorized(res);
+    throw new Error(await readError(res));
+  }
+  const json = await res.json();
+  return { batch: json.corrosionStats || null, remainingImages: json.remainingImages };
 }
 
 export async function deleteInferenceJob(session: VisionSession, inferenceId: string): Promise<void> {

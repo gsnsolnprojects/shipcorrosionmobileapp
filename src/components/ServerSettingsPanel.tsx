@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   KeyboardAvoidingView,
   Modal,
@@ -10,6 +10,8 @@ import {
   View,
 } from "react-native";
 import { getApiBaseUrl, setApiBaseUrlOverride } from "../lib/config";
+import { useTheme } from "../theme/ThemeContext";
+import type { ThemeColors } from "../theme/colors";
 
 /**
  * Lets the crew member point the app at a new backend address (new WiFi, new
@@ -20,6 +22,8 @@ import { getApiBaseUrl, setApiBaseUrlOverride } from "../lib/config";
  * scroll/layout setup the screen it's opened from happens to have.
  */
 export function ServerSettingsPanel({ onSaved }: { onSaved?: () => void }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [open, setOpen] = useState(false);
   const [url, setUrl] = useState(getApiBaseUrl());
 
@@ -56,7 +60,7 @@ export function ServerSettingsPanel({ onSaved }: { onSaved?: () => void }) {
               autoCorrect={false}
               autoFocus
               placeholder="https://your-address/api"
-              placeholderTextColor="#64748b"
+              placeholderTextColor={colors.textMuted}
             />
             <View style={styles.row}>
               <Pressable onPress={() => setOpen(false)} style={styles.cancelBtn}>
@@ -73,37 +77,39 @@ export function ServerSettingsPanel({ onSaved }: { onSaved?: () => void }) {
   );
 }
 
-const styles = StyleSheet.create({
-  linkWrap: { marginTop: 16, alignItems: "center" },
-  link: { color: "#64748b", fontSize: 13, textDecorationLine: "underline" },
-  backdrop: {
-    flex: 1,
-    backgroundColor: "rgba(15,23,42,0.85)",
-    justifyContent: "center",
-    padding: 24,
-  },
-  card: {
-    backgroundColor: "#111827",
-    borderRadius: 16,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: "#1e293b",
-  },
-  label: { color: "#f8fafc", marginBottom: 4, fontSize: 15, fontWeight: "700" },
-  hint: { color: "#94a3b8", fontSize: 12, marginBottom: 14, lineHeight: 16 },
-  input: {
-    backgroundColor: "#0f172a",
-    borderWidth: 1,
-    borderColor: "#334155",
-    borderRadius: 10,
-    color: "#f8fafc",
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    fontSize: 14,
-  },
-  row: { flexDirection: "row", justifyContent: "flex-end", gap: 12, marginTop: 18 },
-  cancelBtn: { paddingHorizontal: 8, paddingVertical: 10 },
-  cancelText: { color: "#94a3b8", fontWeight: "600", fontSize: 14 },
-  saveBtn: { backgroundColor: "#ea580c", borderRadius: 8, paddingHorizontal: 20, paddingVertical: 10 },
-  saveBtnText: { color: "#fff", fontWeight: "700", fontSize: 14 },
-});
+function createStyles(colors: ThemeColors) {
+  return StyleSheet.create({
+    linkWrap: { marginTop: 16, alignItems: "center" },
+    link: { color: colors.textMuted, fontSize: 13, textDecorationLine: "underline" },
+    backdrop: {
+      flex: 1,
+      backgroundColor: "rgba(15,23,42,0.85)",
+      justifyContent: "center",
+      padding: 24,
+    },
+    card: {
+      backgroundColor: colors.surface,
+      borderRadius: 16,
+      padding: 20,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+    },
+    label: { color: colors.textPrimary, marginBottom: 4, fontSize: 15, fontWeight: "700" },
+    hint: { color: colors.textSecondary, fontSize: 12, marginBottom: 14, lineHeight: 16 },
+    input: {
+      backgroundColor: colors.background,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+      borderRadius: 10,
+      color: colors.textPrimary,
+      paddingHorizontal: 12,
+      paddingVertical: 12,
+      fontSize: 14,
+    },
+    row: { flexDirection: "row", justifyContent: "flex-end", gap: 12, marginTop: 18 },
+    cancelBtn: { paddingHorizontal: 8, paddingVertical: 10 },
+    cancelText: { color: colors.textSecondary, fontWeight: "600", fontSize: 14 },
+    saveBtn: { backgroundColor: colors.accent, borderRadius: 8, paddingHorizontal: 20, paddingVertical: 10 },
+    saveBtnText: { color: "#fff", fontWeight: "700", fontSize: 14 },
+  });
+}

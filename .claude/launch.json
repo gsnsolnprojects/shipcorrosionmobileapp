@@ -7,6 +7,13 @@
       "runtimeArgs": ["run", "web"],
       "port": 8081,
       "autoPort": true
+    },
+    {
+      "name": "corrosionmobileapp-devclient",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["expo", "start", "--dev-client"],
+      "port": 8081,
+      "autoPort": true
     }
   ]
 }

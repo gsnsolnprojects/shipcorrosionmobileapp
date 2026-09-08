@@ -13,6 +13,13 @@ export function canRunInference(role: string): boolean {
   return ROLES_WITH_INFERENCE.has(role);
 }
 
+const ROLES_WITH_MANAGE_PROJECTS = new Set(["platform_admin", "workspace_admin"]);
+
+/** Matches the backend's `manageProjects` permission — same roles allowed to rename a project. */
+export function canManageProjects(role: string): boolean {
+  return ROLES_WITH_MANAGE_PROJECTS.has(role);
+}
+
 const PROFILE_CACHE_KEY = "visionm.session.profileCache.v1";
 
 /**

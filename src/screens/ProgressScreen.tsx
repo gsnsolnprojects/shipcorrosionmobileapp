@@ -1,6 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Animated, Pressable, StyleSheet, Text, View } from "react-native";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { ThemeToggle } from "../components/ThemeToggle";
 import { getInferenceStatus } from "../lib/api";
+import { useTheme } from "../theme/ThemeContext";
+import type { ThemeColors } from "../theme/colors";
 import type { VisionSession } from "../types";
 
 export function ProgressScreen({
@@ -18,9 +22,12 @@ export function ProgressScreen({
   onFailed: (message: string) => void;
   onCancelView: () => void;
 }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [percent, setPercent] = useState(0);
   const [status, setStatus] = useState("queued");
   const barProgress = useRef(new Animated.Value(0)).current;
+  const bob = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     Animated.timing(barProgress, {
@@ -29,6 +36,17 @@ export function ProgressScreen({
       useNativeDriver: false,
     }).start();
   }, [percent, barProgress]);
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(bob, { toValue: 1, duration: 900, useNativeDriver: true }),
+        Animated.timing(bob, { toValue: 0, duration: 900, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [bob]);
 
   useEffect(() => {
     let stopped = false;
@@ -76,10 +94,22 @@ export function ProgressScreen({
 
   return (
     <View style={styles.root}>
+      <View style={styles.toggleRow}>
+        <ThemeToggle />
+      </View>
+      <Animated.View
+        style={{
+          transform: [
+            { translateY: bob.interpolate({ inputRange: [0, 1], outputRange: [0, -8] }) },
+          ],
+        }}
+      >
+        <MaterialCommunityIcons name="sail-boat" size={40} color={colors.accentText} />
+      </Animated.View>
       <Text style={styles.title}>Inspecting</Text>
       <Text style={styles.sub}>{regionName}</Text>
       <Text style={styles.status}>{status}</Text>
-      <ActivityIndicator color="#f97316" size="large" style={{ marginTop: 24, marginBottom: 20 }} />
+      <ActivityIndicator color={colors.accent} size="large" style={{ marginTop: 24, marginBottom: 20 }} />
       <View style={styles.barTrack}>
         <Animated.View
           style={[
@@ -101,24 +131,27 @@ export function ProgressScreen({
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#0f172a", alignItems: "center", justifyContent: "center", padding: 24 },
-  title: { color: "#f8fafc", fontSize: 26, fontWeight: "700" },
-  sub: { color: "#fb923c", marginTop: 8, fontWeight: "600" },
-  status: { color: "#94a3b8", marginTop: 12, textTransform: "capitalize" },
-  barTrack: {
-    width: 240,
-    height: 8,
-    borderRadius: 999,
-    backgroundColor: "#1e293b",
-    overflow: "hidden",
-    marginBottom: 14,
-  },
-  barFill: {
-    height: "100%",
-    borderRadius: 999,
-    backgroundColor: "#ea580c",
-  },
-  percent: { color: "#f8fafc", fontSize: 32, fontWeight: "700" },
-  link: { color: "#64748b" },
-});
+function createStyles(colors: ThemeColors) {
+  return StyleSheet.create({
+    root: { flex: 1, backgroundColor: colors.background, alignItems: "center", justifyContent: "center", padding: 24 },
+    toggleRow: { position: "absolute", top: 52, right: 24 },
+    title: { color: colors.textPrimary, fontSize: 26, fontWeight: "700", marginTop: 14 },
+    sub: { color: colors.accentText, marginTop: 8, fontWeight: "600" },
+    status: { color: colors.textSecondary, marginTop: 12, textTransform: "capitalize" },
+    barTrack: {
+      width: 240,
+      height: 8,
+      borderRadius: 999,
+      backgroundColor: colors.surfaceAlt,
+      overflow: "hidden",
+      marginBottom: 14,
+    },
+    barFill: {
+      height: "100%",
+      borderRadius: 999,
+      backgroundColor: colors.accent,
+    },
+    percent: { color: colors.textPrimary, fontSize: 32, fontWeight: "700" },
+    link: { color: colors.textMuted },
+  });
+}

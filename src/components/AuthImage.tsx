@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from "react-native";
 import { fetchAuthImageDataUrl } from "../lib/api";
+import { useTheme } from "../theme/ThemeContext";
+import type { ThemeColors } from "../theme/colors";
 import type { VisionSession } from "../types";
 
 export function AuthImage({
@@ -16,6 +18,8 @@ export function AuthImage({
   resizeMode?: "cover" | "contain";
   onPress?: (dataUrl: string) => void;
 }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [dataUrl, setDataUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -23,6 +27,11 @@ export function AuthImage({
     let cancelled = false;
     setDataUrl(null);
     setFailed(false);
+    // On-device results are already a local data: URI — no server, no auth needed.
+    if (url.startsWith("data:")) {
+      setDataUrl(url);
+      return;
+    }
     fetchAuthImageDataUrl(session, url).then((next) => {
       if (cancelled) return;
       if (next) setDataUrl(next);
@@ -44,7 +53,7 @@ export function AuthImage({
   if (!dataUrl) {
     return (
       <View style={[styles.box, { height }]}>
-        <ActivityIndicator color="#f97316" />
+        <ActivityIndicator color={colors.accent} />
       </View>
     );
   }
@@ -65,34 +74,38 @@ export function AuthImage({
   );
 }
 
-const styles = StyleSheet.create({
-  box: {
-    backgroundColor: "#1e293b",
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-  },
-  image: {
-    width: "100%",
-    height: "100%",
-    backgroundColor: "#1e293b",
-  },
-  hint: {
-    position: "absolute",
-    bottom: 8,
-    left: 8,
-    right: 8,
-    textAlign: "center",
-    color: "#f8fafc",
-    fontSize: 12,
-    fontWeight: "600",
-    textShadowColor: "rgba(0,0,0,0.8)",
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 3,
-  },
-  fail: {
-    color: "#94a3b8",
-    fontSize: 13,
-  },
-});
+function createStyles(colors: ThemeColors) {
+  return StyleSheet.create({
+    box: {
+      backgroundColor: colors.surfaceAlt,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+      overflow: "hidden",
+    },
+    image: {
+      width: "100%",
+      height: "100%",
+      backgroundColor: colors.surfaceAlt,
+    },
+    // Overlaid on top of a photo, not app chrome — stays white+shadow
+    // regardless of theme so it's legible against any image content.
+    hint: {
+      position: "absolute",
+      bottom: 8,
+      left: 8,
+      right: 8,
+      textAlign: "center",
+      color: "#f8fafc",
+      fontSize: 12,
+      fontWeight: "600",
+      textShadowColor: "rgba(0,0,0,0.8)",
+      textShadowOffset: { width: 0, height: 1 },
+      textShadowRadius: 3,
+    },
+    fail: {
+      color: colors.textSecondary,
+      fontSize: 13,
+    },
+  });
+}

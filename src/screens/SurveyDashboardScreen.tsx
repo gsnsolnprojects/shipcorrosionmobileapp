@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -9,11 +9,15 @@ import {
   Text,
   View,
 } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
+import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { ClassLegend } from "../components/ClassLegend";
+import { NauticalBackground } from "../components/NauticalBackground";
+import { ThemeToggle } from "../components/ThemeToggle";
 import { deleteInferenceJob, getSurvey } from "../lib/api";
 import { PIXEL_DISCLAIMER } from "../lib/config";
 import { getQueueForSurvey, removeFromQueue, syncQueue, type QueuedPart } from "../lib/offlineQueue";
+import { useTheme } from "../theme/ThemeContext";
+import type { ThemeColors } from "../theme/colors";
 import type { SurveyDetail, SurveyPart, SurveyVisit, VisionSession } from "../types";
 
 function formatPct(n: number | null | undefined) {
@@ -81,6 +85,8 @@ export function SurveyDashboardScreen({
   onAddPart: () => void;
   onOpenVisit: (inferenceId: string) => void;
 }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [survey, setSurvey] = useState<SurveyDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -195,33 +201,42 @@ export function SurveyDashboardScreen({
 
   return (
     <View style={styles.root}>
+      <NauticalBackground
+        icons={[
+          { name: "anchor", size: 220, opacity: 0.12, style: { bottom: -40, right: -50, transform: [{ rotate: "-10deg" }] } },
+          { name: "waves", size: 140, opacity: 0.13, style: { top: 100, left: -40 } },
+        ]}
+      />
       <View style={styles.header}>
         <Pressable onPress={onBack} style={styles.linkRow}>
-          <Ionicons name="chevron-back" size={18} color="#fb923c" />
+          <Ionicons name="chevron-back" size={18} color={colors.accentText} />
           <Text style={styles.link}>Surveys</Text>
         </Pressable>
-        <Pressable onPress={onAddPart} style={styles.linkRow}>
-          <Ionicons name="add-circle-outline" size={18} color="#fb923c" />
-          <Text style={styles.link}>Part</Text>
-        </Pressable>
+        <View style={styles.headerRight}>
+          <ThemeToggle />
+          <Pressable onPress={onAddPart} style={styles.linkRow}>
+            <Ionicons name="add-circle-outline" size={18} color={colors.accentText} />
+            <Text style={styles.link}>Part</Text>
+          </Pressable>
+        </View>
       </View>
       <Text style={styles.title}>{surveyName}</Text>
       <Text style={styles.hint}>{PIXEL_DISCLAIMER} Whole-ship % is the average of each part’s latest visit.</Text>
 
       {loading && !survey ? (
-        <ActivityIndicator color="#f97316" style={{ marginTop: 24 }} />
+        <ActivityIndicator color={colors.accent} style={{ marginTop: 24 }} />
       ) : error ? (
         <View>
           <Text style={styles.error}>{error}</Text>
           <Pressable style={styles.retry} onPress={load}>
-            <Ionicons name="refresh" size={14} color="#e2e8f0" />
+            <Ionicons name="refresh" size={14} color={colors.textPrimary} />
             <Text style={styles.retryText}>Retry</Text>
           </Pressable>
         </View>
       ) : (
         <ScrollView
           contentContainerStyle={{ paddingBottom: 48 }}
-          refreshControl={<RefreshControl refreshing={loading} onRefresh={load} tintColor="#f97316" />}
+          refreshControl={<RefreshControl refreshing={loading} onRefresh={load} tintColor={colors.accent} />}
         >
           {pendingCount > 0 ? (
             <View style={styles.offlineBanner}>
@@ -242,7 +257,10 @@ export function SurveyDashboardScreen({
           ) : null}
 
           <View style={styles.batch}>
-            <Text style={styles.batchLabel}>Whole ship (this survey)</Text>
+            <View style={styles.batchLabelRow}>
+              <MaterialCommunityIcons name="ferry" size={16} color={colors.accentText} />
+              <Text style={styles.batchLabel}>Whole ship (this survey)</Text>
+            </View>
             <Text style={styles.batchValue}>{formatPct(survey?.overallMeanCorrosionPercent)}</Text>
             <Text style={styles.batchMeta}>
               {survey?.completedPartCount ?? 0} of {survey?.partCount ?? 0} parts have a completed inspect
@@ -258,7 +276,7 @@ export function SurveyDashboardScreen({
           <Text style={styles.section}>Parts</Text>
           {!survey?.parts.length ? (
             <View style={styles.emptyWrap}>
-              <Ionicons name="cube-outline" size={28} color="#475569" />
+              <Ionicons name="cube-outline" size={28} color={colors.textMuted} />
               <Text style={styles.empty}>No parts yet. Walk to an area, name it, and upload photos.</Text>
             </View>
           ) : (
@@ -276,12 +294,12 @@ export function SurveyDashboardScreen({
                   <View style={styles.rowHeader}>
                     <Text style={styles.rowTitle}>{part.regionName}</Text>
                     <Pressable hitSlop={10} onPress={() => deletePart(part)} style={styles.deleteBtn}>
-                      <Ionicons name="trash-outline" size={18} color="#64748b" />
+                      <Ionicons name="trash-outline" size={18} color={colors.textMuted} />
                     </Pressable>
                   </View>
                   {isProcessing ? (
                     <View style={styles.processingRow}>
-                      <ActivityIndicator color="#fb923c" size="small" />
+                      <ActivityIndicator color={colors.accentText} size="small" />
                       <Text style={styles.processingText}>
                         {part.latest.status === "queued" ? "Queued for inspection…" : "Inspecting…"}
                       </Text>
@@ -311,92 +329,96 @@ export function SurveyDashboardScreen({
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#0f172a", padding: 20, paddingTop: 52 },
-  header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
-  linkRow: { flexDirection: "row", alignItems: "center" },
-  link: { color: "#fb923c", fontWeight: "600" },
-  title: { color: "#f8fafc", fontSize: 22, fontWeight: "700" },
-  hint: { color: "#94a3b8", marginTop: 8, marginBottom: 16, lineHeight: 20 },
-  error: { color: "#fca5a5" },
-  retry: {
-    marginTop: 12,
-    alignSelf: "flex-start",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    borderWidth: 1,
-    borderColor: "#334155",
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-  },
-  retryText: { color: "#e2e8f0", fontWeight: "600" },
-  emptyWrap: { alignItems: "center", marginTop: 12, marginBottom: 12, gap: 10 },
-  empty: { color: "#64748b", textAlign: "center", lineHeight: 20 },
-  offlineBanner: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    backgroundColor: "#3f2d12",
-    borderWidth: 1,
-    borderColor: "#7c4a12",
-    borderRadius: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    marginBottom: 14,
-  },
-  offlineBannerText: { color: "#fed7aa", fontWeight: "600", flex: 1, marginRight: 10 },
-  syncBtn: {
-    backgroundColor: "#ea580c",
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    minWidth: 84,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-  },
-  syncBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
-  batch: {
-    backgroundColor: "#111827",
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: "#1e293b",
-  },
-  batchLabel: { color: "#94a3b8", fontSize: 12 },
-  batchValue: { color: "#f8fafc", fontSize: 32, fontWeight: "700", marginTop: 4 },
-  batchMeta: { color: "#64748b", marginTop: 4, marginBottom: 8 },
-  primary: {
-    backgroundColor: "#ea580c",
-    borderRadius: 10,
-    paddingVertical: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    marginBottom: 20,
-  },
-  primaryText: { color: "#fff", fontWeight: "700", fontSize: 16 },
-  section: { color: "#e2e8f0", fontWeight: "700", marginBottom: 10 },
-  row: {
-    backgroundColor: "#111827",
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: "#1e293b",
-  },
-  rowHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
-  deleteBtn: { padding: 2 },
-  rowTitle: { color: "#f8fafc", fontSize: 16, fontWeight: "600", flex: 1, marginRight: 8 },
-  partPct: { color: "#fb923c", fontSize: 22, fontWeight: "700", marginTop: 4 },
-  partPctPending: { color: "#94a3b8", fontSize: 16 },
-  processingRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 6 },
-  processingText: { color: "#fb923c", fontWeight: "700", fontSize: 15 },
-  rowMeta: { color: "#94a3b8", marginTop: 4, fontSize: 13 },
-  openHint: { color: "#64748b", marginTop: 6, fontSize: 12 },
-});
+function createStyles(colors: ThemeColors) {
+  return StyleSheet.create({
+    root: { flex: 1, backgroundColor: colors.background, padding: 20, paddingTop: 52 },
+    header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
+    headerRight: { flexDirection: "row", alignItems: "center", gap: 14 },
+    linkRow: { flexDirection: "row", alignItems: "center" },
+    link: { color: colors.accentText, fontWeight: "600" },
+    title: { color: colors.textPrimary, fontSize: 22, fontWeight: "700" },
+    hint: { color: colors.textSecondary, marginTop: 8, marginBottom: 16, lineHeight: 20 },
+    error: { color: colors.danger },
+    retry: {
+      marginTop: 12,
+      alignSelf: "flex-start",
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+      borderRadius: 8,
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+    },
+    retryText: { color: colors.textPrimary, fontWeight: "600" },
+    emptyWrap: { alignItems: "center", marginTop: 12, marginBottom: 12, gap: 10 },
+    empty: { color: colors.textMuted, textAlign: "center", lineHeight: 20 },
+    offlineBanner: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      backgroundColor: colors.dangerBg,
+      borderWidth: 1,
+      borderColor: colors.accent,
+      borderRadius: 12,
+      paddingVertical: 10,
+      paddingHorizontal: 14,
+      marginBottom: 14,
+    },
+    offlineBannerText: { color: colors.textPrimary, fontWeight: "600", flex: 1, marginRight: 10 },
+    syncBtn: {
+      backgroundColor: colors.accent,
+      borderRadius: 8,
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+      minWidth: 84,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+    },
+    syncBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
+    batch: {
+      backgroundColor: colors.surface,
+      borderRadius: 12,
+      padding: 16,
+      marginBottom: 14,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+    },
+    batchLabelRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+    batchLabel: { color: colors.textSecondary, fontSize: 12 },
+    batchValue: { color: colors.textPrimary, fontSize: 32, fontWeight: "700", marginTop: 4 },
+    batchMeta: { color: colors.textMuted, marginTop: 4, marginBottom: 8 },
+    primary: {
+      backgroundColor: colors.accent,
+      borderRadius: 10,
+      paddingVertical: 14,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      marginBottom: 20,
+    },
+    primaryText: { color: "#fff", fontWeight: "700", fontSize: 16 },
+    section: { color: colors.textPrimary, fontWeight: "700", marginBottom: 10 },
+    row: {
+      backgroundColor: colors.surface,
+      borderRadius: 12,
+      padding: 16,
+      marginBottom: 10,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+    },
+    rowHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
+    deleteBtn: { padding: 2 },
+    rowTitle: { color: colors.textPrimary, fontSize: 16, fontWeight: "600", flex: 1, marginRight: 8 },
+    partPct: { color: colors.accentText, fontSize: 22, fontWeight: "700", marginTop: 4 },
+    partPctPending: { color: colors.textSecondary, fontSize: 16 },
+    processingRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 6 },
+    processingText: { color: colors.accentText, fontWeight: "700", fontSize: 15 },
+    rowMeta: { color: colors.textSecondary, marginTop: 4, fontSize: 13 },
+    openHint: { color: colors.textMuted, marginTop: 6, fontSize: 12 },
+  });
+}
