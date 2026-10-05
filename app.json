@@ -51,7 +51,9 @@
         "expo-build-properties",
         {
           "android": {
+            "minSdkVersion": 26,
             "usesCleartextTraffic": true,
+            "reactNativeArchitectures": ["arm64-v8a"],
             "packagingOptions": {
               "pickFirst": [
                 "**/libc++_shared.so",
@@ -65,11 +67,11 @@
       "react-native-fast-tflite",
       "expo-asset"
     ],
+    "owner": "adityamenon958s-team",
     "extra": {
       "eas": {
-        "projectId": "c31b3cff-a206-483b-9b06-c15dea4515d5"
+        "projectId": "e89a7328-e841-49ef-8cca-b3149f0052dd"
       }
-    },
-    "owner": "adityamenon958"
+    }
   }
 }

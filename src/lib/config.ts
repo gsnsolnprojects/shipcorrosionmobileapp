@@ -4,9 +4,6 @@ const ENV_API_BASE_URL = (process.env.EXPO_PUBLIC_API_BASE_URL || "").replace(/\
 export const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || "";
 export const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || "";
 
-export const PIXEL_DISCLAIMER =
-  "% of this photo’s pixels tagged as rust, not % of the real steel surface.";
-
 const API_BASE_URL_OVERRIDE_KEY = "visionm.config.apiBaseUrlOverride";
 let apiBaseUrlOverride: string | null = null;
 

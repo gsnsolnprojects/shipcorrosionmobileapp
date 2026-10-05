@@ -54,18 +54,11 @@ export function SurveyListScreen({
   const [newName, setNewName] = useState(`${projectName} survey ${todayLabel()}`);
   const [search, setSearch] = useState("");
 
-  const load = async () => {
-    setLoading(true);
-    setError(null);
-
-    let fetched: SurveySummary[] = [];
-    let fetchError: string | null = null;
-    try {
-      fetched = await listSurveys(session, projectName);
-    } catch (err) {
-      fetchError = err instanceof Error ? err.message : "Could not load surveys";
-    }
-
+  // Merges fetched surveys with offline-queued ones and renders — pulled
+  // out of load() so the stale-while-revalidate background refresh (see
+  // listSurveys' onFresh below) can re-render once fresh data arrives
+  // without re-triggering another network fetch.
+  const renderSurveys = async (fetched: SurveySummary[]): Promise<SurveySummary[]> => {
     const queue = await getQueue();
     const pending: Record<string, number> = {};
     for (const item of queue) {
@@ -88,6 +81,27 @@ export function SurveyListScreen({
 
     const merged = [...fetched, ...offlineOnly];
     setSurveys(merged);
+    return merged;
+  };
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+
+    let fetched: SurveySummary[] = [];
+    let fetchError: string | null = null;
+    try {
+      // Returns cached data immediately if there is any — onFresh re-renders
+      // later if a background network refresh succeeds, without blocking
+      // this screen on the network at all.
+      fetched = await listSurveys(session, projectName, (fresh) => {
+        renderSurveys(fresh);
+      });
+    } catch (err) {
+      fetchError = err instanceof Error ? err.message : "Could not load surveys";
+    }
+
+    const merged = await renderSurveys(fetched);
     setError(fetchError && merged.length === 0 ? fetchError : null);
     setLoading(false);
 

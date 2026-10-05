@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -10,6 +10,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
@@ -19,13 +20,14 @@ import { NauticalBackground } from "../components/NauticalBackground";
 import { OnDeviceModelPanel } from "../components/OnDeviceModelPanel";
 import { ShipAreaPicker } from "../components/ShipAreaPicker";
 import { ThemeToggle } from "../components/ThemeToggle";
-import { PIXEL_DISCLAIMER } from "../lib/config";
-import { enqueuePart } from "../lib/offlineQueue";
+import { LiveInspectScreen } from "./LiveInspectScreen";
+import { getLatestForRegion, type RegionHistory } from "../lib/api";
+import { enqueuePart, saveQueuedPartPhotoEdits } from "../lib/offlineQueue";
 import { CORROSION_CLASS_NAMES, runOnDeviceInspection } from "../lib/onDeviceInference";
 import { canRunInference } from "../lib/session";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/colors";
-import type { InspectResults, LocalPhoto, VisionSession } from "../types";
+import { partLabel, type CaptureExtras, type InspectResults, type KnownSpot, type LocalPhoto, type VisionSession } from "../types";
 
 function photoFromAsset(asset: ImagePicker.ImagePickerAsset, index: number): LocalPhoto {
   const uri = asset.uri;
@@ -40,29 +42,94 @@ export function CaptureScreen({
   projectName,
   surveyName,
   initialRegionName,
+  appendTargetId,
+  editQueuedPart,
   onBack,
   onUpload,
   onOnDeviceInspect,
+  onAppendInspect,
+  onSavedQueuedPartEdits,
+  onResurvey,
 }: {
   session: VisionSession;
   projectName: string;
   surveyName: string;
   initialRegionName?: string;
+  /** When set, this screen is adding a missed photo to an ALREADY-SURVEYED
+   * part's job instead of starting a new one — no region picker, no raw
+   * server-upload option, and results go to `onAppendInspect` instead. */
+  appendTargetId?: string;
+  /** When set, this screen is editing a STILL-QUEUED (not yet synced) part
+   * in place — add/remove photos, save back to the SAME pending entry
+   * instead of creating a new one. */
+  editQueuedPart?: { id: string; initialPhotos: LocalPhoto[] };
   onBack: () => void;
-  onUpload: (regionName: string, photos: LocalPhoto[]) => Promise<void>;
+  onUpload: (regionName: string, photos: LocalPhoto[], extras: CaptureExtras) => Promise<void>;
   onOnDeviceInspect: (results: InspectResults) => void;
+  onAppendInspect?: (results: InspectResults) => void;
+  onSavedQueuedPartEdits?: () => void;
+  /** Offers "resurvey instead?" when the typed region name was already
+   * surveyed before, in a different survey. */
+  onResurvey?: (baselineInferenceId: string, area: string) => void;
 }) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [regionName, setRegionName] = useState(initialRegionName || "");
-  const [photos, setPhotos] = useState<LocalPhoto[]>([]);
+  const [photos, setPhotos] = useState<LocalPhoto[]>(editQueuedPart?.initialPhotos ?? []);
   const [showCamera, setShowCamera] = useState(false);
+  const [showLive, setShowLive] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [savingEdits, setSavingEdits] = useState(false);
   const [inspectingOnDevice, setInspectingOnDevice] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
   const flashOpacity = useRef(new Animated.Value(0)).current;
+  const [componentName, setComponentName] = useState("");
+  const [notes, setNotes] = useState("");
+  const [resurveySuggestion, setResurveySuggestion] = useState<RegionHistory["job"]>(null);
+  const [knownSpots, setKnownSpots] = useState<KnownSpot[]>([]);
+  const [matchedSpot, setMatchedSpot] = useState<KnownSpot | null>(null);
+  const [dismissedSuggestionFor, setDismissedSuggestionFor] = useState<string | null>(null);
+
+  // Only offered when starting a brand-new part (not append/edit), before any
+  // photos are taken, and not for the region the user already dismissed.
+  const canPickSpot = !appendTargetId && !editQueuedPart;
+  const canSuggestResurvey = canPickSpot && !!onResurvey && photos.length === 0;
+
+  // While naming a part: look up the spots already known in this area (offered
+  // as quick picks), whether this exact area + component was captured before,
+  // and its most recent earlier visit (for the "resurvey instead?" suggestion).
+  useEffect(() => {
+    const name = regionName.trim();
+    if (!canPickSpot || name.length < 2) {
+      setResurveySuggestion(null);
+      setKnownSpots([]);
+      setMatchedSpot(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const res = await getLatestForRegion(session, projectName, name, componentName, surveyName);
+        if (cancelled) return;
+        setResurveySuggestion(res.job);
+        setKnownSpots(res.observations);
+        setMatchedSpot(res.observation);
+      } catch {
+        if (!cancelled) {
+          setResurveySuggestion(null);
+          setKnownSpots([]);
+          setMatchedSpot(null);
+        }
+      }
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [regionName, componentName, canPickSpot, session, projectName, surveyName]);
 
   const addPhotos = (incoming: LocalPhoto[]) => {
     setPhotos((prev) => {
@@ -125,7 +192,7 @@ export function CaptureScreen({
     if (!name || photos.length === 0) return;
     setUploading(true);
     try {
-      await onUpload(name, photos);
+      await onUpload(name, photos, { componentName: componentName.trim(), notes: notes.trim() });
     } catch (err) {
       // A network-looking failure (no signal) — save the part on-device instead
       // of losing it, so it can upload automatically once back online.
@@ -142,6 +209,8 @@ export function CaptureScreen({
           surveyName,
           regionName: name,
           photos,
+          componentName: componentName.trim(),
+          notes: notes.trim(),
         });
         Alert.alert(
           "Saved offline",
@@ -157,8 +226,10 @@ export function CaptureScreen({
   };
 
   // Runs the corrosion model directly on the phone — no server, no network,
-  // across every captured photo. Not saved to survey history (that only
-  // exists server-side) — this is an on-the-spot check, not a permanent record.
+  // across every captured photo. This is a quick preview, not yet saved to
+  // the survey; the results screen's "Confirm & add to survey" button
+  // uploads these same photos for real server inference when the user
+  // decides to keep it.
   const inspectOnDevice = async () => {
     const name = regionName.trim();
     if (!name || photos.length === 0) return;
@@ -177,14 +248,51 @@ export function CaptureScreen({
           classNames: [...CORROSION_CLASS_NAMES],
         },
         classNames: [...CORROSION_CLASS_NAMES],
+        componentName: componentName.trim(),
+        notes: notes.trim(),
       };
-      onOnDeviceInspect(results);
+      if (appendTargetId) {
+        onAppendInspect?.(results);
+      } else {
+        onOnDeviceInspect(results);
+      }
     } catch (err) {
       Alert.alert("On-device inspect failed", err instanceof Error ? err.message : String(err));
     } finally {
       setInspectingOnDevice(false);
     }
   };
+
+  // Applies the add/remove diff against the SAME still-queued part instead
+  // of creating a new one — for "I forgot a photo" / "this one's bad" while
+  // the part hasn't even reached the server yet.
+  const saveQueuedEdits = async () => {
+    if (!editQueuedPart || photos.length === 0) return;
+    setSavingEdits(true);
+    try {
+      await saveQueuedPartPhotoEdits(editQueuedPart.id, editQueuedPart.initialPhotos, photos);
+      onSavedQueuedPartEdits?.();
+      onBack();
+    } catch (err) {
+      Alert.alert("Could not save changes", err instanceof Error ? err.message : "Try again.");
+    } finally {
+      setSavingEdits(false);
+    }
+  };
+
+  if (showLive) {
+    return (
+      <LiveInspectScreen
+        session={session}
+        projectName={projectName}
+        onCapture={(photo) => {
+          addPhotos([photo]);
+          setShowLive(false);
+        }}
+        onClose={() => setShowLive(false)}
+      />
+    );
+  }
 
   if (showCamera) {
     const lastPhoto = photos[photos.length - 1];
@@ -246,15 +354,89 @@ export function CaptureScreen({
       </View>
       <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
         <View style={styles.titleRow}>
-          <Ionicons name="construct-outline" size={22} color={colors.accentText} />
-          <Text style={styles.title}>Inspect a part</Text>
+          <Ionicons
+            name={editQueuedPart ? "create-outline" : appendTargetId ? "add-circle-outline" : "construct-outline"}
+            size={22}
+            color={colors.accentText}
+          />
+          <Text style={styles.title}>
+            {editQueuedPart ? "Edit pending photos" : appendTargetId ? "Add a missed photo" : "Inspect a part"}
+          </Text>
         </View>
         <Text style={styles.hint}>
-          Walk to one area of the ship, name it (for example Cargo hold 3 starboard), then upload photos. {PIXEL_DISCLAIMER}
+          {editQueuedPart
+            ? `This part hasn't been sent yet — add or remove photos and it stays as one pending "${regionName}" entry.`
+            : appendTargetId
+              ? `These photo(s) will be added to the existing "${regionName}" survey — not a new visit.`
+              : `Walk to one area of the ship, name it (for example Cargo hold 3 starboard), then upload photos.`}
         </Text>
 
         <Text style={styles.label}>Ship part</Text>
-        <ShipAreaPicker value={regionName} onChangeText={setRegionName} placeholder="Cargo hold 3 starboard" />
+        {editQueuedPart || appendTargetId ? (
+          <Text style={styles.lockedRegionName}>{regionName}</Text>
+        ) : (
+          <ShipAreaPicker value={regionName} onChangeText={setRegionName} placeholder="Cargo hold 3 starboard" />
+        )}
+
+        {canPickSpot ? (
+          <>
+            <Text style={[styles.label, { marginTop: 14 }]}>Component / spot (optional)</Text>
+            <TextInput
+              value={componentName}
+              onChangeText={setComponentName}
+              placeholder="e.g. Fuel pump, Port hatch coaming"
+              placeholderTextColor={colors.textMuted}
+              style={styles.input}
+            />
+            {knownSpots.some((k) => k.componentName) ? (
+              <View style={styles.spotChips}>
+                {knownSpots
+                  .filter((k) => k.componentName)
+                  .map((k) => {
+                    const active = k.componentName.trim().toLowerCase() === componentName.trim().toLowerCase();
+                    return (
+                      <Pressable
+                        key={k.observationId}
+                        style={[styles.spotChip, active && styles.spotChipActive]}
+                        onPress={() => setComponentName(active ? "" : k.componentName)}
+                      >
+                        <Text style={[styles.spotChipText, active && styles.spotChipTextActive]}>{k.componentName}</Text>
+                      </Pressable>
+                    );
+                  })}
+              </View>
+            ) : null}
+            {regionName.trim().length >= 2 ? (
+              <Text style={styles.spotHint}>
+                {matchedSpot
+                  ? `Known spot ${matchedSpot.observationId} — this inspection is added to its history.`
+                  : "New spot — it gets an ID (OBS-…) automatically once uploaded."}
+              </Text>
+            ) : null}
+          </>
+        ) : null}
+
+        {resurveySuggestion && dismissedSuggestionFor !== resurveySuggestion.inferenceId ? (
+          <View style={styles.resurveyBanner}>
+            <Text style={styles.resurveyBannerText}>
+              {resurveySuggestion.observationId ? `${resurveySuggestion.observationId} · ` : ""}"
+              {partLabel({ regionName: regionName.trim(), componentName })}" was last surveyed in "{resurveySuggestion.surveyName}" on{" "}
+              {new Date(resurveySuggestion.createdAt).toLocaleDateString()}.
+            </Text>
+            <View style={styles.resurveyBannerActions}>
+              <Pressable onPress={() => setDismissedSuggestionFor(resurveySuggestion.inferenceId)}>
+                <Text style={styles.resurveyBannerDismiss}>Not now</Text>
+              </Pressable>
+              <Pressable
+                style={styles.resurveyBannerBtn}
+                onPress={() => onResurvey?.(resurveySuggestion.inferenceId, regionName.trim())}
+              >
+                <Ionicons name="repeat" size={14} color="#fff" />
+                <Text style={styles.resurveyBannerBtnText}>Resurvey instead?</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
 
         <View style={styles.rowBtns}>
           <Pressable style={styles.secondary} onPress={openCamera}>
@@ -264,6 +446,10 @@ export function CaptureScreen({
           <Pressable style={styles.secondary} onPress={pickGallery}>
             <Ionicons name="images" size={18} color={colors.textPrimary} />
             <Text style={styles.secondaryText}>Gallery</Text>
+          </Pressable>
+          <Pressable style={styles.secondary} onPress={() => setShowLive(true)}>
+            <Ionicons name="scan" size={18} color={colors.textPrimary} />
+            <Text style={styles.secondaryText}>Live scan</Text>
           </Pressable>
         </View>
 
@@ -282,35 +468,85 @@ export function CaptureScreen({
           ))}
         </View>
 
-        <Pressable style={[styles.primary, !canUpload && styles.disabled]} onPress={upload} disabled={!canUpload}>
-          {uploading ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <>
-              <Ionicons name="cloud-upload-outline" size={18} color="#fff" />
-              <Text style={styles.primaryText}>Upload & inspect</Text>
-            </>
-          )}
-        </Pressable>
+        {canPickSpot ? (
+          <>
+            <Text style={[styles.label, { marginTop: 16 }]}>Notes (optional)</Text>
+            <TextInput
+              value={notes}
+              onChangeText={setNotes}
+              placeholder="Anything worth recording, e.g. pitting near the weld"
+              placeholderTextColor={colors.textMuted}
+              style={[styles.input, styles.notesInput]}
+              multiline
+            />
+          </>
+        ) : null}
 
-        <Pressable
-          style={[styles.secondaryAction, !canInspectOnDevice && styles.disabled]}
-          onPress={inspectOnDevice}
-          disabled={!canInspectOnDevice}
-        >
-          {inspectingOnDevice ? (
-            <ActivityIndicator color={colors.textPrimary} />
-          ) : (
-            <>
-              <Ionicons name="hardware-chip-outline" size={18} color={colors.textPrimary} />
-              <Text style={styles.secondaryActionText}>Inspect on-device</Text>
-            </>
-          )}
-        </Pressable>
-        <Text style={styles.onDeviceHint}>
-          Runs the model on this phone, no signal needed. Not saved to survey history — an
-          on-the-spot check, not a permanent record.
-        </Text>
+        {editQueuedPart ? (
+          <>
+            <Pressable
+              style={[styles.primary, (savingEdits || photos.length === 0) && styles.disabled]}
+              onPress={saveQueuedEdits}
+              disabled={savingEdits || photos.length === 0}
+            >
+              {savingEdits ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <>
+                  <Ionicons name="save-outline" size={18} color="#fff" />
+                  <Text style={styles.primaryText}>Save changes</Text>
+                </>
+              )}
+            </Pressable>
+            <Text style={styles.onDeviceHint}>
+              Saved locally — this still uploads the normal way once you're online, with the updated photo set.
+            </Text>
+          </>
+        ) : (
+          <>
+            {appendTargetId ? null : (
+              <Pressable style={[styles.primary, !canUpload && styles.disabled]} onPress={upload} disabled={!canUpload}>
+                {uploading ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <>
+                    <Ionicons name="cloud-upload-outline" size={18} color="#fff" />
+                    <Text style={styles.primaryText}>Upload & inspect</Text>
+                  </>
+                )}
+              </Pressable>
+            )}
+
+            <Pressable
+              style={[
+                appendTargetId ? styles.primary : styles.secondaryAction,
+                !canInspectOnDevice && styles.disabled,
+              ]}
+              onPress={inspectOnDevice}
+              disabled={!canInspectOnDevice}
+            >
+              {inspectingOnDevice ? (
+                <ActivityIndicator color={appendTargetId ? "#fff" : colors.textPrimary} />
+              ) : (
+                <>
+                  <Ionicons
+                    name="hardware-chip-outline"
+                    size={18}
+                    color={appendTargetId ? "#fff" : colors.textPrimary}
+                  />
+                  <Text style={appendTargetId ? styles.primaryText : styles.secondaryActionText}>
+                    {appendTargetId ? "Add to survey" : "Inspect on-device"}
+                  </Text>
+                </>
+              )}
+            </Pressable>
+            <Text style={styles.onDeviceHint}>
+              {appendTargetId
+                ? "Runs the model on this phone, no signal needed, then adds these photo(s) straight to the existing survey entry."
+                : "Runs the model on this phone, no signal needed — a quick preview. On the results screen you can confirm to upload it as a real survey part."}
+            </Text>
+          </>
+        )}
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -328,6 +564,16 @@ function createStyles(colors: ThemeColors) {
   title: { color: colors.textPrimary, fontSize: 26, fontWeight: "700" },
   hint: { color: colors.textSecondary, marginTop: 8, marginBottom: 16, lineHeight: 20 },
   label: { color: colors.textSecondary, marginBottom: 6 },
+  lockedRegionName: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.surfaceBorder,
+    borderRadius: 10,
+    color: colors.textPrimary,
+    fontWeight: "600",
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+  },
   input: {
     backgroundColor: colors.surface,
     borderWidth: 1,
@@ -337,6 +583,40 @@ function createStyles(colors: ThemeColors) {
     paddingHorizontal: 12,
     paddingVertical: 12,
   },
+  resurveyBanner: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.accent,
+    borderRadius: 10,
+    padding: 12,
+    marginTop: 10,
+  },
+  resurveyBannerText: { color: colors.textPrimary, fontSize: 13, lineHeight: 18 },
+  resurveyBannerActions: { flexDirection: "row", justifyContent: "flex-end", alignItems: "center", gap: 14, marginTop: 10 },
+  resurveyBannerDismiss: { color: colors.textSecondary, fontWeight: "600", fontSize: 13 },
+  resurveyBannerBtn: {
+    backgroundColor: colors.accent,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  resurveyBannerBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
+  notesInput: { minHeight: 70, textAlignVertical: "top" },
+  spotChips: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 },
+  spotChip: {
+    borderWidth: 1,
+    borderColor: colors.surfaceBorder,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  spotChipActive: { backgroundColor: colors.accent, borderColor: colors.accent },
+  spotChipText: { color: colors.textPrimary, fontSize: 13, fontWeight: "600" },
+  spotChipTextActive: { color: "#fff" },
+  spotHint: { color: colors.textMuted, fontSize: 12, marginTop: 8, lineHeight: 17 },
   rowBtns: { flexDirection: "row", gap: 10, marginTop: 16 },
   secondary: {
     flex: 1,

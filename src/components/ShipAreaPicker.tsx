@@ -1,9 +1,12 @@
 import { useMemo, useState } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { ShipZoneMap } from "./ShipZoneMap";
 import { COMMON_SHIP_AREAS } from "../lib/shipAreas";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/colors";
+
+type PickerMode = "list" | "ship";
 
 /**
  * A text-input-styled field that opens a picker of common ship areas, with
@@ -23,10 +26,12 @@ export function ShipAreaPicker({
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [open, setOpen] = useState(false);
   const [customMode, setCustomMode] = useState(false);
+  const [mode, setMode] = useState<PickerMode>("list");
   const [draft, setDraft] = useState("");
 
   const openPicker = () => {
     setCustomMode(false);
+    setMode("list");
     setDraft(value);
     setOpen(true);
   };
@@ -77,21 +82,45 @@ export function ShipAreaPicker({
             ) : (
               <>
                 <Text style={styles.title}>Ship area</Text>
-                <ScrollView style={{ maxHeight: 340 }}>
-                  {COMMON_SHIP_AREAS.map((area) => (
-                    <Pressable key={area} style={styles.row_item} onPress={() => pick(area)}>
-                      <Text style={styles.rowText}>{area}</Text>
-                      {area === value ? (
-                        <Ionicons name="checkmark" size={18} color={colors.accentText} />
-                      ) : null}
-                    </Pressable>
-                  ))}
-                  <Pressable style={styles.row_item} onPress={() => setCustomMode(true)}>
-                    <Text style={[styles.rowText, { color: colors.accentText, fontWeight: "700" }]}>
-                      Other (type your own)…
-                    </Text>
+                <View style={styles.tabRow}>
+                  <Pressable
+                    style={[styles.tabBtn, mode === "list" && styles.tabBtnActive]}
+                    onPress={() => setMode("list")}
+                  >
+                    <Text style={[styles.tabText, mode === "list" && styles.tabTextActive]}>List</Text>
                   </Pressable>
-                </ScrollView>
+                  <Pressable
+                    style={[styles.tabBtn, mode === "ship" && styles.tabBtnActive]}
+                    onPress={() => setMode("ship")}
+                  >
+                    <Text style={[styles.tabText, mode === "ship" && styles.tabTextActive]}>Ship</Text>
+                  </Pressable>
+                </View>
+                {mode === "ship" ? (
+                  <ShipZoneMap
+                    zones={COMMON_SHIP_AREAS.map((area) => ({
+                      area,
+                      color: area === value ? colors.accent : colors.textMuted,
+                    }))}
+                    onSelectZone={pick}
+                  />
+                ) : (
+                  <ScrollView style={{ maxHeight: 340 }}>
+                    {COMMON_SHIP_AREAS.map((area) => (
+                      <Pressable key={area} style={styles.row_item} onPress={() => pick(area)}>
+                        <Text style={styles.rowText}>{area}</Text>
+                        {area === value ? (
+                          <Ionicons name="checkmark" size={18} color={colors.accentText} />
+                        ) : null}
+                      </Pressable>
+                    ))}
+                    <Pressable style={styles.row_item} onPress={() => setCustomMode(true)}>
+                      <Text style={[styles.rowText, { color: colors.accentText, fontWeight: "700" }]}>
+                        Other (type your own)…
+                      </Text>
+                    </Pressable>
+                  </ScrollView>
+                )}
                 <Pressable onPress={() => setOpen(false)} style={styles.closeBtn}>
                   <Text style={styles.cancelText}>Cancel</Text>
                 </Pressable>
@@ -133,6 +162,19 @@ function createStyles(colors: ThemeColors) {
       borderColor: colors.surfaceBorder,
     },
     title: { color: colors.textPrimary, fontSize: 17, fontWeight: "700", marginBottom: 10 },
+    tabRow: {
+      flexDirection: "row",
+      backgroundColor: colors.background,
+      borderRadius: 8,
+      padding: 3,
+      marginBottom: 12,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+    },
+    tabBtn: { flex: 1, paddingVertical: 7, alignItems: "center", borderRadius: 6 },
+    tabBtnActive: { backgroundColor: colors.accent },
+    tabText: { color: colors.textSecondary, fontWeight: "600", fontSize: 13 },
+    tabTextActive: { color: "#fff" },
     row_item: {
       paddingVertical: 12,
       borderBottomWidth: 1,

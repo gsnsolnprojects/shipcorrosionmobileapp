@@ -2,6 +2,7 @@ import { Directory, File, Paths } from "expo-file-system";
 import { Asset } from "expo-asset";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { apiUrl } from "./config";
+import { fetchWithTimeout } from "./fetchWithTimeout";
 import { authHeaderRecord } from "./session";
 import type { VisionSession } from "../types";
 
@@ -80,7 +81,7 @@ export async function downloadPinnedModel(
   const headers = authHeaderRecord(session, true);
 
   const qs = new URLSearchParams({ company: session.companyName, project: projectName });
-  const configRes = await fetch(apiUrl(`/mobile-inspect/config?${qs.toString()}`), { headers });
+  const configRes = await fetchWithTimeout(apiUrl(`/mobile-inspect/config?${qs.toString()}`), { headers });
   if (!configRes.ok) {
     throw new Error(`Could not check the pinned model (HTTP ${configRes.status})`);
   }

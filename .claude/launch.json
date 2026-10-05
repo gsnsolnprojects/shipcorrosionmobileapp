@@ -2,11 +2,11 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "corrosionmobileapp",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "web"],
-      "port": 8081,
-      "autoPort": true
+      "name": "corrosionmobileapp-webpreview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["expo", "start", "--web", "--port", "8090"],
+      "port": 8090,
+      "autoPort": false
     },
     {
       "name": "corrosionmobileapp-devclient",

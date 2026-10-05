@@ -11,14 +11,29 @@ import {
 } from "react-native";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { ClassLegend } from "../components/ClassLegend";
+import { ComparisonModal } from "../components/ComparisonModal";
 import { NauticalBackground } from "../components/NauticalBackground";
+import { ResurveyStartModal } from "../components/ResurveyStartModal";
+import { ShipZoneMap } from "../components/ShipZoneMap";
 import { ThemeToggle } from "../components/ThemeToggle";
-import { deleteInferenceJob, getSurvey } from "../lib/api";
-import { PIXEL_DISCLAIMER } from "../lib/config";
-import { getQueueForSurvey, removeFromQueue, syncQueue, type QueuedPart } from "../lib/offlineQueue";
+import { deleteInferenceJob, getRegionsAwaitingResurvey, getSurvey } from "../lib/api";
+import {
+  enqueueAppendResult,
+  enqueueOnDeviceResult,
+  getQueueForSurvey,
+  removeFromQueue,
+  syncQueue,
+  type QueuedOnDevicePart,
+  type QueuedPart,
+  type QueuedUploadPart,
+} from "../lib/offlineQueue";
+import { CORROSION_CLASS_NAMES, runOnDeviceInspection } from "../lib/onDeviceInference";
+import { assessmentSummary } from "../lib/assessment";
+import { COMMON_SHIP_AREAS } from "../lib/shipAreas";
+import { deriveSeverityBand, severityColor } from "../lib/severity";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/colors";
-import type { SurveyDetail, SurveyPart, SurveyVisit, VisionSession } from "../types";
+import { partLabel, type InspectResults, type SurveyDetail, type SurveyPart, type SurveyVisit, type VisionSession } from "../types";
 
 function formatPct(n: number | null | undefined) {
   if (typeof n !== "number" || Number.isNaN(n)) return "—";
@@ -39,7 +54,12 @@ function emptySurveyDetail(surveyName: string): SurveyDetail {
   };
 }
 
-function offlinePart(item: QueuedPart): SurveyPart {
+function offlinePart(item: QueuedUploadPart | QueuedOnDevicePart): SurveyPart {
+  // An on-device-confirmed part queued offline already has real computed
+  // stats (nothing left to infer) — a plain queued upload doesn't yet.
+  const imageCount = item.kind === "on_device" ? item.images.length : item.photos.length;
+  const meanCorrosionPercent = item.kind === "on_device" ? item.meanCorrosionPercent : null;
+  const byClass = item.kind === "on_device" ? item.byClass : [];
   const visit: SurveyVisit = {
     inferenceId: item.id,
     status: "queued_offline",
@@ -47,17 +67,24 @@ function offlinePart(item: QueuedPart): SurveyPart {
     surveyName: item.surveyName,
     createdAt: item.createdAt,
     completedAt: null,
-    imageCount: item.photos.length,
-    meanCorrosionPercent: null,
-    byClass: [],
+    imageCount,
+    meanCorrosionPercent,
+    byClass,
     offline: true,
+    componentName: item.componentName || "",
+    notes: item.notes || "",
   };
   return {
+    partKey: item.id,
     regionName: item.regionName,
+    componentName: item.componentName || "",
+    observationId: null,
+    inspectorName: null,
+    notes: item.notes || "",
     visitCount: 1,
-    meanCorrosionPercent: null,
-    imageCount: item.photos.length,
-    byClass: [],
+    meanCorrosionPercent,
+    imageCount,
+    byClass,
     latest: visit,
     latestCompleted: null,
     visits: [visit],
@@ -66,8 +93,29 @@ function offlinePart(item: QueuedPart): SurveyPart {
 
 function mergeOfflineParts(survey: SurveyDetail, queued: QueuedPart[]): SurveyDetail {
   if (queued.length === 0) return survey;
-  const extra = queued.map(offlinePart);
-  return { ...survey, partCount: survey.partCount + extra.length, parts: [...survey.parts, ...extra] };
+
+  // A queued "append" targets an already-existing part's job — fold it into
+  // that part's row (as a pending-photos count) instead of showing it as a
+  // separate duplicate part, which "upload"/"on_device" entries still do
+  // (those really are new, not-yet-synced parts).
+  const pendingAppends = new Map<string, number>();
+  for (const item of queued) {
+    if (item.kind === "append") {
+      pendingAppends.set(item.regionName, (pendingAppends.get(item.regionName) || 0) + item.images.length);
+    }
+  }
+  const parts =
+    pendingAppends.size > 0
+      ? survey.parts.map((p) =>
+          pendingAppends.has(p.regionName) ? { ...p, pendingAppendCount: pendingAppends.get(p.regionName) } : p
+        )
+      : survey.parts;
+
+  const extra = queued
+    .filter((p): p is QueuedUploadPart | QueuedOnDevicePart => p.kind !== "append")
+    .map(offlinePart);
+  if (extra.length === 0) return { ...survey, parts };
+  return { ...survey, partCount: survey.partCount + extra.length, parts: [...parts, ...extra] };
 }
 
 export function SurveyDashboardScreen({
@@ -76,21 +124,53 @@ export function SurveyDashboardScreen({
   surveyName,
   onBack,
   onAddPart,
+  onAddPartWithArea,
+  onAddPhotosToPart,
+  onEditQueuedPart,
   onOpenVisit,
+  onStartResurvey,
 }: {
   session: VisionSession;
   projectName: string;
   surveyName: string;
   onBack: () => void;
   onAddPart: () => void;
+  onAddPartWithArea: (area: string) => void;
+  onAddPhotosToPart: (area: string, targetInferenceId: string) => void;
+  onEditQueuedPart: (area: string, queuedPartId: string) => void;
   onOpenVisit: (inferenceId: string) => void;
+  onStartResurvey: (area: string, baselineInferenceId: string, targetSurveyName: string) => void;
 }) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [survey, setSurvey] = useState<SurveyDetail | null>(null);
+  const [resurveyPart, setResurveyPart] = useState<SurveyPart | null>(null);
+  // Region names with a repair closed on the web dashboard but not yet
+  // confirmed by a resurvey here — best-effort, never blocks the screen.
+  const [regionsAwaitingResurvey, setRegionsAwaitingResurvey] = useState<Set<string>>(new Set());
+  const [compareInferenceId, setCompareInferenceId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  // Only "upload" (raw photos) queue entries have anything left to run —
+  // "on_device" entries already have computed results waiting to sync.
+  const [queuedUploads, setQueuedUploads] = useState<QueuedUploadPart[]>([]);
+  const [runningLocally, setRunningLocally] = useState(false);
+
+  // Merges a survey detail with offline-queued parts and renders — pulled
+  // out of fetchSurvey() so the stale-while-revalidate background refresh
+  // (see getSurvey's onFresh below) can re-render once fresh data arrives
+  // without re-triggering another network fetch.
+  const renderSurvey = useCallback(
+    async (base: SurveyDetail) => {
+      const queued = await getQueueForSurvey(projectName, surveyName);
+      setQueuedUploads(queued.filter((p): p is QueuedUploadPart => p.kind === "upload"));
+      const merged = mergeOfflineParts(base, queued);
+      setSurvey(merged);
+      return merged;
+    },
+    [projectName, surveyName]
+  );
 
   // Pure fetch-and-merge, no sync attempt — this is what the auto-refresh
   // poll uses, so it just checks status without also hammering the upload
@@ -100,20 +180,23 @@ export function SurveyDashboardScreen({
     let base: SurveyDetail;
     let fetchError: string | null = null;
     try {
-      base = await getSurvey(session, projectName, surveyName);
+      // Returns cached data immediately if there is any — onFresh re-renders
+      // later if a background network refresh succeeds, without blocking
+      // this screen on the network at all.
+      base = await getSurvey(session, projectName, surveyName, (fresh) => {
+        renderSurvey(fresh);
+      });
     } catch (err) {
       base = emptySurveyDetail(surveyName);
       fetchError = err instanceof Error ? err.message : "Could not load survey";
     }
 
-    const queued = await getQueueForSurvey(projectName, surveyName);
-    const merged = mergeOfflineParts(base, queued);
-    setSurvey(merged);
+    const merged = await renderSurvey(base);
     // Only block the screen with an error when there's truly nothing else to show —
     // if we have offline-queued parts, show those instead of a scary error.
     setError(fetchError && merged.parts.length === 0 ? fetchError : null);
     return merged;
-  }, [session, projectName, surveyName]);
+  }, [session, projectName, surveyName, renderSurvey]);
 
   const load = useCallback(async () => {
     await fetchSurvey();
@@ -126,7 +209,13 @@ export function SurveyDashboardScreen({
         if (result.uploaded > 0) fetchSurvey();
       })
       .catch(() => {});
-  }, [fetchSurvey, session]);
+
+    // Best-effort: surface repairs closed on the web dashboard that haven't
+    // been confirmed by a resurvey yet.
+    getRegionsAwaitingResurvey(session, projectName)
+      .then(setRegionsAwaitingResurvey)
+      .catch(() => {});
+  }, [fetchSurvey, session, projectName]);
 
   useEffect(() => {
     setLoading(true);
@@ -151,13 +240,64 @@ export function SurveyDashboardScreen({
     }
   };
 
+  // Runs the on-device model on every queued "upload" part's photos, right
+  // now, no network needed — turns a plain queued-photos entry into a
+  // queued on_device entry with real computed stats, same as if the user
+  // had tapped "Inspect on-device" for it live. Syncing later then just
+  // uploads these already-computed results, same as any other on-device part.
+  const runLocally = async () => {
+    if (queuedUploads.length === 0) return;
+    setRunningLocally(true);
+    let failed = 0;
+    try {
+      for (const part of queuedUploads) {
+        try {
+          const batch = await runOnDeviceInspection(part.photos);
+          const results: InspectResults = {
+            inferenceId: `ondevice_${Date.now()}`,
+            regionName: part.regionName,
+            surveyName: part.surveyName,
+            images: batch.images,
+            batch: {
+              imageCount: part.photos.length,
+              meanCorrosionPercent: batch.meanCorrosionPercent ?? undefined,
+              byClass: batch.byClass,
+              classNames: [...CORROSION_CLASS_NAMES],
+            },
+            classNames: [...CORROSION_CLASS_NAMES],
+          };
+          await enqueueOnDeviceResult({
+            companyId: part.companyId,
+            companyName: part.companyName,
+            projectName: part.projectName,
+            surveyName: part.surveyName,
+            regionName: part.regionName,
+            results,
+          });
+          await removeFromQueue(part.id);
+        } catch {
+          failed += 1;
+        }
+      }
+      if (failed > 0) {
+        Alert.alert(
+          "Some parts failed",
+          `${failed} part(s) could not be inspected on-device and will stay queued for upload instead.`
+        );
+      }
+    } finally {
+      setRunningLocally(false);
+      fetchSurvey();
+    }
+  };
+
   const deletePart = (part: SurveyPart) => {
     const isOffline = !!part.latest.offline;
     Alert.alert(
       "Delete this part?",
       isOffline
-        ? `Remove the queued photos for "${part.regionName}" before they upload?`
-        : `This permanently deletes all ${part.visitCount} visit(s) of "${part.regionName}". This cannot be undone.`,
+        ? `Remove the queued photos for "${partLabel(part)}" before they upload?`
+        : `This permanently deletes "${partLabel(part)}" and all its photos. This cannot be undone.`,
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -185,6 +325,7 @@ export function SurveyDashboardScreen({
     );
   };
 
+  const resurveyedCount = survey?.parts.filter((p) => !!p.latestCompleted?.baselineInferenceId).length ?? 0;
   const pendingCount = survey?.parts.filter((p) => p.latest.offline).length ?? 0;
   const hasActiveJob = survey?.parts.some((p) => ["queued", "running"].includes(p.latest.status)) ?? false;
 
@@ -221,7 +362,7 @@ export function SurveyDashboardScreen({
         </View>
       </View>
       <Text style={styles.title}>{surveyName}</Text>
-      <Text style={styles.hint}>{PIXEL_DISCLAIMER} Whole-ship % is the average of each part’s latest visit.</Text>
+      <Text style={styles.hint}>Whole-ship % is the average of each part’s %.</Text>
 
       {loading && !survey ? (
         <ActivityIndicator color={colors.accent} style={{ marginTop: 24 }} />
@@ -243,16 +384,34 @@ export function SurveyDashboardScreen({
               <Text style={styles.offlineBannerText}>
                 {pendingCount} part{pendingCount === 1 ? "" : "s"} waiting to upload
               </Text>
-              <Pressable style={styles.syncBtn} onPress={syncNow} disabled={syncing}>
-                {syncing ? (
-                  <ActivityIndicator color="#fff" size="small" />
-                ) : (
-                  <>
-                    <Ionicons name="cloud-upload-outline" size={14} color="#fff" />
-                    <Text style={styles.syncBtnText}>Sync now</Text>
-                  </>
-                )}
-              </Pressable>
+              <View style={styles.offlineBannerActions}>
+                {queuedUploads.length > 0 ? (
+                  <Pressable
+                    style={styles.localBtn}
+                    onPress={runLocally}
+                    disabled={runningLocally || syncing}
+                  >
+                    {runningLocally ? (
+                      <ActivityIndicator color={colors.accent} size="small" />
+                    ) : (
+                      <>
+                        <Ionicons name="hardware-chip-outline" size={14} color={colors.accent} />
+                        <Text style={styles.localBtnText}>Run locally</Text>
+                      </>
+                    )}
+                  </Pressable>
+                ) : null}
+                <Pressable style={styles.syncBtn} onPress={syncNow} disabled={syncing || runningLocally}>
+                  {syncing ? (
+                    <ActivityIndicator color="#fff" size="small" />
+                  ) : (
+                    <>
+                      <Ionicons name="cloud-upload-outline" size={14} color="#fff" />
+                      <Text style={styles.syncBtnText}>Sync now</Text>
+                    </>
+                  )}
+                </Pressable>
+              </View>
             </View>
           ) : null}
 
@@ -265,7 +424,40 @@ export function SurveyDashboardScreen({
             <Text style={styles.batchMeta}>
               {survey?.completedPartCount ?? 0} of {survey?.partCount ?? 0} parts have a completed inspect
             </Text>
+            {resurveyedCount > 0 ? (
+              <View style={styles.resurveySummaryRow}>
+                <Ionicons name="repeat" size={13} color={colors.accent} />
+                <Text style={styles.resurveySummaryText}>
+                  {resurveyedCount} of {survey?.partCount ?? 0} part{resurveyedCount === 1 ? "" : "s"} resurveyed
+                </Text>
+              </View>
+            ) : null}
             <ClassLegend items={survey?.byClass} classNames={survey?.classNames} showStats />
+          </View>
+
+          <Text style={styles.section}>Ship overview</Text>
+          <Text style={styles.shipHint}>Tap a colored area to view it, or a gray area to start surveying it.</Text>
+          <View style={styles.shipWrap}>
+            <ShipZoneMap
+              zones={COMMON_SHIP_AREAS.map((area) => {
+                const part = survey?.parts.find((p) => p.regionName === area) || null;
+                const band = part?.assessment?.severity ?? deriveSeverityBand(part?.meanCorrosionPercent);
+                return {
+                  area,
+                  color: severityColor(band, colors),
+                  subtitle: part ? formatPct(part.meanCorrosionPercent) : undefined,
+                };
+              })}
+              onSelectZone={(area) => {
+                const part = survey?.parts.find((p) => p.regionName === area);
+                const canOpen = part && (part.latestCompleted || part.latest.status === "completed");
+                if (canOpen && part) {
+                  onOpenVisit(part.latestCompleted?.inferenceId || part.latest.inferenceId);
+                } else {
+                  onAddPartWithArea(area);
+                }
+              }}
+            />
           </View>
 
           <Pressable style={styles.primary} onPress={onAddPart}>
@@ -287,15 +479,68 @@ export function SurveyDashboardScreen({
               const isProcessing = !isOffline && ["queued", "running"].includes(part.latest.status);
               return (
                 <Pressable
-                  key={part.latest.inferenceId || part.regionName}
+                  key={part.partKey || part.latest.inferenceId || part.regionName}
                   style={styles.row}
                   onPress={() => canOpen && onOpenVisit(openId)}
                 >
                   <View style={styles.rowHeader}>
-                    <Text style={styles.rowTitle}>{part.regionName}</Text>
-                    <Pressable hitSlop={10} onPress={() => deletePart(part)} style={styles.deleteBtn}>
-                      <Ionicons name="trash-outline" size={18} color={colors.textMuted} />
-                    </Pressable>
+                    <View style={styles.rowTitleWrap}>
+                      <Text style={styles.rowTitle}>{partLabel(part)}</Text>
+                      {part.observationId ? <Text style={styles.obsId}>{part.observationId}</Text> : null}
+                      {part.latestCompleted?.baselineInferenceId ? (
+                        <View style={styles.resurveyedTag}>
+                          <Ionicons name="repeat" size={11} color={colors.accent} />
+                          <Text style={styles.resurveyedTagText}>Resurveyed</Text>
+                        </View>
+                      ) : null}
+                    </View>
+                    <View style={styles.rowActions}>
+                      <Pressable
+                        hitSlop={10}
+                        onPress={() => {
+                          if (part.latestCompleted) {
+                            // Always add into the same existing part — a part
+                            // has exactly one ongoing entry, never separate visits.
+                            onAddPhotosToPart(part.regionName, part.latestCompleted.inferenceId);
+                          } else if (isOffline) {
+                            // Still fully local (never reached the server) — edit
+                            // this exact pending entry instead of starting a new one.
+                            onEditQueuedPart(part.regionName, part.latest.inferenceId);
+                          } else if (isProcessing) {
+                            Alert.alert(
+                              "Still inspecting",
+                              "Wait for the current inspection to finish before adding more photos."
+                            );
+                          } else {
+                            onAddPartWithArea(part.regionName);
+                          }
+                        }}
+                        style={styles.deleteBtn}
+                      >
+                        <Ionicons name="camera-outline" size={18} color={colors.textMuted} />
+                      </Pressable>
+                      {part.latestCompleted?.baselineInferenceId || part.latestCompleted?.previousInferenceId ? (
+                        <Pressable
+                          hitSlop={10}
+                          onPress={() => setCompareInferenceId(part.latestCompleted!.inferenceId)}
+                          style={styles.deleteBtn}
+                        >
+                          <Ionicons name="git-compare-outline" size={18} color={colors.textMuted} />
+                        </Pressable>
+                      ) : null}
+                      {part.latestCompleted ? (
+                        <Pressable
+                          hitSlop={10}
+                          onPress={() => setResurveyPart(part)}
+                          style={styles.deleteBtn}
+                        >
+                          <Ionicons name="repeat-outline" size={18} color={colors.textMuted} />
+                        </Pressable>
+                      ) : null}
+                      <Pressable hitSlop={10} onPress={() => deletePart(part)} style={styles.deleteBtn}>
+                        <Ionicons name="trash-outline" size={18} color={colors.textMuted} />
+                      </Pressable>
+                    </View>
                   </View>
                   {isProcessing ? (
                     <View style={styles.processingRow}>
@@ -314,17 +559,66 @@ export function SurveyDashboardScreen({
                       ? "Queued — waiting to upload"
                       : isProcessing
                         ? "This can take a moment — updates automatically"
-                        : `Latest ${part.latest.status}`}
-                    {part.visitCount > 1 ? ` · ${part.visitCount} visits` : ""}
+                        : part.latest.status.charAt(0).toUpperCase() + part.latest.status.slice(1)}
                     {part.imageCount ? ` · ${part.imageCount} photo(s)` : ""}
+                    {part.pendingAppendCount
+                      ? ` · +${part.pendingAppendCount} photo(s) queued to add`
+                      : ""}
                   </Text>
+                  {part.assessment && assessmentSummary(part.assessment) ? (
+                    <Text style={styles.rowAssessment}>Inspector assessment: {assessmentSummary(part.assessment)}</Text>
+                  ) : null}
+                  {part.latestCompleted?.review ? (
+                    <Text
+                      style={[
+                        styles.rowAssessment,
+                        part.latestCompleted.review.verdict === "worse" && { color: colors.danger },
+                        part.latestCompleted.review.verdict === "better" && { color: colors.success },
+                      ]}
+                    >
+                      Reviewer:{" "}
+                      {part.latestCompleted.review.verdict === "worse"
+                        ? "confirmed deterioration"
+                        : part.latestCompleted.review.verdict === "better"
+                          ? "improved"
+                          : "no change"}
+                    </Text>
+                  ) : null}
+                  {part.inspectorName ? <Text style={styles.rowInspector}>Inspected by {part.inspectorName}</Text> : null}
+                  {part.notes ? <Text style={styles.rowNotes}>Note: {part.notes}</Text> : null}
                   {canOpen ? <Text style={styles.openHint}>Tap to view this part’s photos</Text> : null}
+                  {regionsAwaitingResurvey.has(part.observationId || part.regionName) ? (
+                    <Pressable style={styles.resurveyNudge} onPress={() => setResurveyPart(part)}>
+                      <Ionicons name="repeat" size={13} color={colors.accent} />
+                      <Text style={styles.resurveyNudgeText}>Repair closed — resurvey to confirm</Text>
+                    </Pressable>
+                  ) : null}
                 </Pressable>
               );
             })
           )}
         </ScrollView>
       )}
+
+      <ComparisonModal
+        session={session}
+        currentInferenceId={compareInferenceId}
+        onClose={() => setCompareInferenceId(null)}
+      />
+
+      <ResurveyStartModal
+        visible={!!resurveyPart}
+        projectName={projectName}
+        area={resurveyPart ? partLabel(resurveyPart) : ""}
+        onCancel={() => setResurveyPart(null)}
+        onConfirm={(targetSurveyName) => {
+          if (!resurveyPart?.latestCompleted) return;
+          const area = resurveyPart.regionName;
+          const baselineId = resurveyPart.latestCompleted.inferenceId;
+          setResurveyPart(null);
+          onStartResurvey(area, baselineId, targetSurveyName);
+        }}
+      />
     </View>
   );
 }
@@ -356,8 +650,10 @@ function createStyles(colors: ThemeColors) {
     empty: { color: colors.textMuted, textAlign: "center", lineHeight: 20 },
     offlineBanner: {
       flexDirection: "row",
+      flexWrap: "wrap",
       alignItems: "center",
       justifyContent: "space-between",
+      rowGap: 10,
       backgroundColor: colors.dangerBg,
       borderWidth: 1,
       borderColor: colors.accent,
@@ -367,6 +663,7 @@ function createStyles(colors: ThemeColors) {
       marginBottom: 14,
     },
     offlineBannerText: { color: colors.textPrimary, fontWeight: "600", flex: 1, marginRight: 10 },
+    offlineBannerActions: { flexDirection: "row", alignItems: "center", gap: 8 },
     syncBtn: {
       backgroundColor: colors.accent,
       borderRadius: 8,
@@ -379,6 +676,20 @@ function createStyles(colors: ThemeColors) {
       gap: 6,
     },
     syncBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
+    localBtn: {
+      backgroundColor: "transparent",
+      borderWidth: 1.5,
+      borderColor: colors.accent,
+      borderRadius: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 7.5,
+      minWidth: 100,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+    },
+    localBtnText: { color: colors.accent, fontWeight: "700", fontSize: 13 },
     batch: {
       backgroundColor: colors.surface,
       borderRadius: 12,
@@ -391,6 +702,17 @@ function createStyles(colors: ThemeColors) {
     batchLabel: { color: colors.textSecondary, fontSize: 12 },
     batchValue: { color: colors.textPrimary, fontSize: 32, fontWeight: "700", marginTop: 4 },
     batchMeta: { color: colors.textMuted, marginTop: 4, marginBottom: 8 },
+    resurveySummaryRow: { flexDirection: "row", alignItems: "center", gap: 5, marginBottom: 8 },
+    resurveySummaryText: { color: colors.accent, fontWeight: "600", fontSize: 12 },
+    shipHint: { color: colors.textMuted, fontSize: 12, marginBottom: 10 },
+    shipWrap: {
+      backgroundColor: colors.surface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+      marginBottom: 20,
+      overflow: "hidden",
+    },
     primary: {
       backgroundColor: colors.accent,
       borderRadius: 10,
@@ -412,13 +734,52 @@ function createStyles(colors: ThemeColors) {
       borderColor: colors.surfaceBorder,
     },
     rowHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
+    rowActions: { flexDirection: "row", alignItems: "center", gap: 14 },
     deleteBtn: { padding: 2 },
-    rowTitle: { color: colors.textPrimary, fontSize: 16, fontWeight: "600", flex: 1, marginRight: 8 },
+    rowTitleWrap: { flex: 1, marginRight: 8, gap: 4 },
+    obsId: { color: colors.textMuted, fontSize: 11, fontWeight: "600", letterSpacing: 0.5 },
+    rowAssessment: { color: colors.accentText, fontSize: 12, fontWeight: "600", marginTop: 4 },
+    rowInspector: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
+    rowNotes: {
+      color: colors.textSecondary,
+      fontSize: 12,
+      marginTop: 6,
+      backgroundColor: colors.surfaceAlt,
+      borderRadius: 8,
+      paddingHorizontal: 8,
+      paddingVertical: 5,
+    },
+    rowTitle: { color: colors.textPrimary, fontSize: 16, fontWeight: "600" },
+    resurveyedTag: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      alignSelf: "flex-start",
+      backgroundColor: colors.surfaceAlt,
+      borderRadius: 999,
+      paddingHorizontal: 8,
+      paddingVertical: 2,
+    },
+    resurveyedTagText: { color: colors.accent, fontWeight: "600", fontSize: 11 },
     partPct: { color: colors.accentText, fontSize: 22, fontWeight: "700", marginTop: 4 },
     partPctPending: { color: colors.textSecondary, fontSize: 16 },
     processingRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 6 },
     processingText: { color: colors.accentText, fontWeight: "700", fontSize: 15 },
     rowMeta: { color: colors.textSecondary, marginTop: 4, fontSize: 13 },
     openHint: { color: colors.textMuted, marginTop: 6, fontSize: 12 },
+    resurveyNudge: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      marginTop: 8,
+      alignSelf: "flex-start",
+      backgroundColor: colors.surfaceAlt,
+      borderWidth: 1,
+      borderColor: colors.accent,
+      borderRadius: 999,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+    },
+    resurveyNudgeText: { color: colors.accent, fontWeight: "600", fontSize: 12 },
   });
 }

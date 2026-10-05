@@ -6,11 +6,12 @@ import { ClassLegend } from "../components/ClassLegend";
 import { ImageViewerModal } from "../components/ImageViewerModal";
 import { NauticalBackground } from "../components/NauticalBackground";
 import { ThemeToggle } from "../components/ThemeToggle";
-import { deleteInferenceImage } from "../lib/api";
-import { PIXEL_DISCLAIMER } from "../lib/config";
+import { confirmInferencePart, deleteInferenceImage, saveAssessment } from "../lib/api";
+import { DAMAGE_TAG_OPTIONS, SEVERITY_OPTIONS, severityLabel } from "../lib/assessment";
+import { deriveSeverityBand, severityColor } from "../lib/severity";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/colors";
-import type { CorrosionByClass, InspectResults, ResultImage, VisionSession } from "../types";
+import type { Assessment, CorrosionByClass, DamageTag, InspectResults, ResultImage, Severity, VisionSession } from "../types";
 
 function formatPct(n: number | undefined | null): string {
   if (typeof n !== "number" || Number.isNaN(n)) return "—";
@@ -46,12 +47,15 @@ export function ResultsScreen({
   onNewInspect,
   onAddMorePhotos,
   onBackToSurvey,
+  onConfirmOnDeviceUpload,
 }: {
   session: VisionSession;
   results: InspectResults;
   onNewInspect: () => void;
   onAddMorePhotos?: () => void;
   onBackToSurvey?: () => void;
+  /** For on-device previews: uploads the same photos for real server inference, making this a permanent survey part. */
+  onConfirmOnDeviceUpload?: (assessment: Assessment) => Promise<void>;
 }) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -60,6 +64,67 @@ export function ResultsScreen({
   const [images, setImages] = useState<ResultImage[]>(results.images);
   const [batch, setBatch] = useState<InspectResults["batch"]>(results.batch);
   const [deletingFilename, setDeletingFilename] = useState<string | null>(null);
+  const [confirmed, setConfirmed] = useState(!!results.confirmed);
+  const [confirming, setConfirming] = useState(false);
+
+  // The inspector's own call on severity + damage types. The AI's corrosion-%
+  // band is pre-selected as a suggestion, so confirming as-is is one tap.
+  const aiBand = deriveSeverityBand(results.batch?.meanCorrosionPercent);
+  const [severity, setSeverity] = useState<Severity | null>(results.assessment?.severity ?? aiBand);
+  const [damageTags, setDamageTags] = useState<DamageTag[]>(results.assessment?.damageTags ?? []);
+  const [savedAssessment, setSavedAssessment] = useState<Assessment | null>(results.assessment ?? null);
+  const [savingAssessment, setSavingAssessment] = useState(false);
+
+  const currentAssessment = (): Assessment => ({ severity, damageTags });
+  const sameTags = (a: DamageTag[], b: DamageTag[]) => [...a].sort().join() === [...b].sort().join();
+  const assessmentDirty =
+    confirmed && (severity !== (savedAssessment?.severity ?? null) || !sameTags(damageTags, savedAssessment?.damageTags ?? []));
+  const toggleTag = (tag: DamageTag) =>
+    setDamageTags((prev) => (prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]));
+
+  const saveChanges = async () => {
+    setSavingAssessment(true);
+    try {
+      const saved = await saveAssessment(session, results.inferenceId, currentAssessment());
+      setSavedAssessment(saved);
+    } catch (err) {
+      Alert.alert("Couldn’t save assessment", err instanceof Error ? err.message : "Try again.");
+    } finally {
+      setSavingAssessment(false);
+    }
+  };
+
+  const confirmPart = async () => {
+    setConfirming(true);
+    try {
+      if (isOnDevice) {
+        if (onConfirmOnDeviceUpload) await onConfirmOnDeviceUpload(currentAssessment());
+        // Success swaps in the real, completed job under a new inferenceId —
+        // App.tsx keys this screen by inferenceId, so it remounts fresh
+        // rather than reusing this instance's stale local state.
+        return;
+      }
+      await confirmInferencePart(session, results.inferenceId, currentAssessment());
+      setSavedAssessment(currentAssessment());
+      setConfirmed(true);
+      setConfirming(false);
+    } catch (err) {
+      Alert.alert(
+        isOnDevice ? "Upload failed" : "Couldn’t confirm",
+        err instanceof Error ? err.message : "Try again."
+      );
+      setConfirming(false);
+    }
+  };
+
+  const locked = !confirmed;
+  const requireConfirm = (action: () => void) => () => {
+    if (locked) {
+      Alert.alert("Confirm this part first", "Tap the confirm button below before leaving this screen.");
+      return;
+    }
+    action();
+  };
 
   const percents = imagePercents(images);
   const totalCorrosion =
@@ -126,18 +191,18 @@ export function ResultsScreen({
       />
       <View style={styles.header}>
         {onBackToSurvey ? (
-          <Pressable onPress={onBackToSurvey} style={styles.linkRow}>
-            <Ionicons name="chevron-back" size={18} color={colors.accentText} />
-            <Text style={styles.link}>Survey</Text>
+          <Pressable onPress={requireConfirm(onBackToSurvey)} style={[styles.linkRow, locked && styles.linkRowLocked]}>
+            <Ionicons name="chevron-back" size={18} color={locked ? colors.textMuted : colors.accentText} />
+            <Text style={[styles.link, locked && styles.linkLocked]}>Survey</Text>
           </Pressable>
         ) : (
           <Text style={styles.title}>Results</Text>
         )}
         <View style={styles.headerRight}>
           <ThemeToggle />
-          <Pressable onPress={onNewInspect} style={styles.linkRow}>
-            <Text style={styles.link}>Next part</Text>
-            <Ionicons name="chevron-forward" size={18} color={colors.accentText} />
+          <Pressable onPress={requireConfirm(onNewInspect)} style={[styles.linkRow, locked && styles.linkRowLocked]}>
+            <Text style={[styles.link, locked && styles.linkLocked]}>Next part</Text>
+            <Ionicons name="chevron-forward" size={18} color={locked ? colors.textMuted : colors.accentText} />
           </Pressable>
         </View>
       </View>
@@ -150,7 +215,6 @@ export function ResultsScreen({
       {results.surveyName ? <Text style={styles.region}>{results.surveyName}</Text> : null}
       <ScrollView contentContainerStyle={{ paddingBottom: 48 }}>
         {results.regionName ? <Text style={styles.region}>{results.regionName}</Text> : null}
-        <Text style={styles.disclaimer}>{PIXEL_DISCLAIMER}</Text>
 
         <View style={styles.batch}>
           <Text style={styles.batchLabel}>This part</Text>
@@ -166,6 +230,92 @@ export function ResultsScreen({
           ) : null}
           <ClassLegend items={batchClasses} classNames={classNames} showStats />
         </View>
+
+        <View style={styles.assessCard}>
+          <View style={styles.assessHeader}>
+            <Ionicons name="clipboard-outline" size={18} color={colors.accentText} />
+            <Text style={styles.assessTitle}>Your assessment</Text>
+          </View>
+          <Text style={styles.assessHint}>
+            {aiBand
+              ? `The AI suggests ${severityLabel(aiBand)} (${formatPct(results.batch?.meanCorrosionPercent)}). Confirm it, or change it if you see otherwise.`
+              : "Pick the severity you see on this part."}
+          </Text>
+
+          <Text style={styles.assessLabel}>Severity</Text>
+          <View style={styles.chipRow}>
+            {SEVERITY_OPTIONS.map((opt) => {
+              const active = severity === opt.value;
+              const color = severityColor(opt.value, colors);
+              return (
+                <Pressable
+                  key={opt.value}
+                  onPress={() => setSeverity(opt.value)}
+                  style={[styles.assessChip, { borderColor: color }, active && { backgroundColor: color }]}
+                >
+                  <Text style={[styles.assessChipText, { color: active ? "#fff" : colors.textPrimary }]}>{opt.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <Text style={styles.assessLabel}>Damage you can see (optional)</Text>
+          <View style={styles.chipRow}>
+            {DAMAGE_TAG_OPTIONS.map((opt) => {
+              const active = damageTags.includes(opt.value);
+              return (
+                <Pressable
+                  key={opt.value}
+                  onPress={() => toggleTag(opt.value)}
+                  style={[styles.assessChip, { borderColor: colors.accent }, active && { backgroundColor: colors.accent }]}
+                >
+                  <Text style={[styles.assessChipText, { color: active ? "#fff" : colors.textPrimary }]}>{opt.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          {assessmentDirty ? (
+            <Pressable style={styles.assessSave} onPress={saveChanges} disabled={savingAssessment}>
+              {savingAssessment ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <Text style={styles.confirmBtnText}>Save assessment</Text>
+              )}
+            </Pressable>
+          ) : null}
+        </View>
+
+        {confirmed ? (
+          <View style={styles.confirmedBanner}>
+            <Ionicons name="checkmark-circle" size={20} color={colors.success} />
+            <Text style={styles.confirmedText}>Confirmed — this part is added to the survey</Text>
+          </View>
+        ) : (
+          <>
+            <Text style={styles.confirmHint}>
+              {isOnDevice
+                ? "This is an on-device preview, not yet saved. Confirm to upload these results and add this part to the survey — Survey and Next part are locked until you do."
+                : "Confirm to leave this screen — Survey and Next part are locked until you do."}
+            </Text>
+            <Pressable style={styles.confirmBtn} onPress={confirmPart} disabled={confirming}>
+              {confirming ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <>
+                  <Ionicons
+                    name={isOnDevice ? "cloud-upload-outline" : "checkmark-circle-outline"}
+                    size={18}
+                    color="#fff"
+                  />
+                  <Text style={styles.confirmBtnText}>
+                    {isOnDevice ? "Confirm assessment & upload" : "Confirm assessment"}
+                  </Text>
+                </>
+              )}
+            </Pressable>
+          </>
+        )}
 
         {onAddMorePhotos ? (
           <Pressable style={styles.addMoreBtn} onPress={onAddMorePhotos}>
@@ -227,9 +377,10 @@ function createStyles(colors: ThemeColors) {
     title: { color: colors.textPrimary, fontSize: 26, fontWeight: "700" },
     titleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
     linkRow: { flexDirection: "row", alignItems: "center" },
+    linkRowLocked: { opacity: 0.45 },
     link: { color: colors.accentText, fontWeight: "600" },
+    linkLocked: { color: colors.textMuted },
     region: { color: colors.accentText, fontWeight: "700", fontSize: 16, marginBottom: 6 },
-    disclaimer: { color: colors.textSecondary, marginBottom: 16, lineHeight: 20 },
     batch: {
       backgroundColor: colors.surface,
       borderRadius: 12,
@@ -241,6 +392,53 @@ function createStyles(colors: ThemeColors) {
     batchLabel: { color: colors.textSecondary, fontSize: 12 },
     batchValue: { color: colors.textPrimary, fontSize: 32, fontWeight: "700", marginTop: 4 },
     batchMeta: { color: colors.textMuted, marginTop: 4, marginBottom: 4 },
+    assessCard: {
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+      borderRadius: 12,
+      padding: 14,
+      marginBottom: 14,
+    },
+    assessHeader: { flexDirection: "row", alignItems: "center", gap: 8 },
+    assessTitle: { color: colors.textPrimary, fontWeight: "700", fontSize: 15 },
+    assessHint: { color: colors.textSecondary, fontSize: 12, lineHeight: 17, marginTop: 6 },
+    assessLabel: { color: colors.textMuted, fontSize: 12, fontWeight: "600", marginTop: 12, marginBottom: 6 },
+    chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+    assessChip: { borderWidth: 1.5, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 7 },
+    assessChipText: { fontSize: 13, fontWeight: "700" },
+    assessSave: {
+      backgroundColor: colors.accent,
+      borderRadius: 10,
+      paddingVertical: 11,
+      alignItems: "center",
+      marginTop: 14,
+    },
+    confirmHint: { color: colors.textMuted, fontSize: 12, marginBottom: 8, lineHeight: 17 },
+    confirmBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      backgroundColor: colors.accent,
+      borderRadius: 10,
+      paddingVertical: 13,
+      marginBottom: 12,
+    },
+    confirmBtnText: { color: "#fff", fontWeight: "700", fontSize: 15 },
+    confirmedBanner: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.success,
+      borderRadius: 10,
+      paddingVertical: 12,
+      paddingHorizontal: 14,
+      marginBottom: 12,
+    },
+    confirmedText: { color: colors.textPrimary, fontWeight: "600", fontSize: 13, flex: 1 },
     addMoreBtn: {
       flexDirection: "row",
       alignItems: "center",
